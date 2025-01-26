@@ -1,6 +1,6 @@
 import json
 from typing import Optional
-from unittest.mock import create_autospec
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import BaseModel, Field
@@ -26,20 +26,25 @@ class AIHistoryFact(BaseModel):
 
 @pytest.fixture
 def tracked_tools():
-    def create_tracked_tool(original_tool):
-        # Create a spy on the original tool's execute method
-        original_execute = original_tool.execute
-        execution_tracker = create_autospec(original_execute)
+    """Fixture to create tracked versions of tool functions."""
 
-        # Make sure we call the original function and get its return value
-        def execute_with_tracking(**kwargs):
-            return original_execute(**kwargs)
+    def create_tracked_tool(tool_obj):
+        # Create a MagicMock to track executions
+        execution_tracker = MagicMock()
 
-        execution_tracker.side_effect = execute_with_tracking
+        # Store original execute method
+        original_execute = tool_obj.execute
 
-        # Replace the execute method but maintain all other properties
-        original_tool.execute = execution_tracker
-        return original_tool, execution_tracker
+        # Create wrapped execute method that tracks calls
+        def tracked_execute(**kwargs):
+            result = original_execute(**kwargs)
+            execution_tracker(**kwargs)  # Track the call
+            return result
+
+        # Replace execute method with tracked version
+        tool_obj.execute = tracked_execute
+
+        return tool_obj, execution_tracker
 
     return create_tracked_tool
 
@@ -245,6 +250,7 @@ class TestStructuredOutput:
 
     def test_flight_info_structured(self, llm_client, tracked_tools):
         """Test generating structured flight information."""
+        # Use the existing module-level decorated function instead of creating a new one
         tracked_tool, execute_tracker = tracked_tools(get_flight_times)
 
         prompt = """Generate structured information about the flight from JFK to LAX.
