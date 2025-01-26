@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "llm-interface"
-version = "0.1.1"
+version = "0.1.2"
 description = "A flexible interface for working with various LLM providers"
 authors = ["Niels Provos <provos@gmail.com>"]
 license = "Apache-2.0"
@@ -8,7 +8,7 @@ readme = "README.md"
 packages = [{include = "llm_interface"}]
 
 [tool.poetry.dependencies]
-python = ">=3.10,<3.13"
+python = "^3.10"
 pydantic = ">=2.8.2"
 python-dotenv = ">=1.0.1"
 paramiko = ">=3.4.1"
