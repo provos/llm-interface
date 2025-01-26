@@ -3,6 +3,7 @@
 [![PyPI version](https://badge.fury.io/py/llm-interface.svg)](https://badge.fury.io/py/llm-interface)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Python Versions](https://img.shields.io/pypi/pyversions/llm-interface.svg)](https://pypi.org/project/llm-interface/)
+[![codecov](https://codecov.io/gh/provos/llm-interface/graph/badge.svg?token=A5HBFRHACO)](https://codecov.io/gh/provos/llm-interface)
 
 A flexible Python interface for working with various Language Model providers, including OpenAI, Anthropic, and Ollama. This library provides a unified way to interact with different LLM providers while supporting features like structured outputs, tool execution, and response caching.
 
