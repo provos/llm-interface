@@ -134,7 +134,7 @@ Required environment variables based on provider:
 
 - OpenAI: `OPENAI_API_KEY`
 - Anthropic: `ANTHROPIC_API_KEY`
-- Remote Ollama: SSH key loaded in SSH agent
+- Remote Ollama: requires an SSH key to be loaded in SSH agent
 
 ## Development
 
