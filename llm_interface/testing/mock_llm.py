@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Dict, List, Optional, Pattern, Type, Union
 
@@ -65,6 +66,8 @@ class MockLLM(LLMInterface):
                 full_prompt += f"System: {msg['content']}\n"
             elif msg["role"] == "user":
                 full_prompt += f"User: {msg['content']}\n"
+
+        logging.info(f"Mock LLM received prompt: {full_prompt}")
 
         # Try to match the prompt against our patterns
         for mock_response in self.responses:
