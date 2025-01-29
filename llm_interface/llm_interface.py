@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
 import diskcache
 from dotenv import load_dotenv
-from ollama import Client
+from ollama import Client, ListResponse
 from pydantic import BaseModel
 
 from .llm_tool import Tool
@@ -68,6 +68,10 @@ class LLMInterface:
             if use_cache
             else NoCache()
         )
+
+    def list(self) -> ListResponse:
+        """List available models."""
+        return self.client.list()
 
     def _execute_tool(
         self, tool_call: Dict[str, Any], tools: List[Tool]

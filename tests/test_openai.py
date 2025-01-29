@@ -1,8 +1,11 @@
+import datetime
 import unittest
 from unittest.mock import MagicMock, Mock, patch
+from datetime import datetime, timezone
 
 from openai import ContentFilterFinishReasonError, LengthFinishReasonError
-from openai.types import CompletionUsage
+from openai.pagination import SyncPage
+from openai.types import CompletionUsage, Model
 
 from llm_interface.openai import OpenAIWrapper
 
@@ -128,6 +131,42 @@ class TestOpenAIWrapper(unittest.TestCase):
             )
 
         self.assertEqual(str(context.exception), "Test exception")
+
+    def test_list_models(self):
+        # Create mock model data
+        models_data = [
+            Model(id="gpt-4", created=1687882411, object="model", owned_by="openai"),
+            Model(id="gpt-3.5-turbo", created=1677610602, object="model", owned_by="openai"),
+        ]
+        mock_response = SyncPage[Model](data=models_data, object="list")
+
+        # Set up the mock return value
+        self.mock_client.models.list.return_value = mock_response
+
+        # Call the list method
+        response = self.openai_wrapper.list()
+
+        print(response)
+
+        # Verify the response format matches Ollama's format
+        self.assertIn("models", response)
+        self.assertEqual(len(response["models"]), 2)
+
+        # Verify first model data
+        model = response["models"][0]
+        self.assertEqual(model["model"], "gpt-4")
+        self.assertEqual(
+            model["modified_at"],
+            datetime.fromtimestamp(1687882411, tz=timezone.utc)
+        )
+        self.assertEqual(model["digest"], "unknown")
+        self.assertEqual(model["size"], 0)
+
+        # Verify model details
+        self.assertEqual(model["details"]["family"], "openai")
+        self.assertEqual(model["details"]["families"], ["openai"])
+        self.assertEqual(model["details"]["parameter_size"], "unknown")
+        self.assertEqual(model["details"]["quantization_level"], "unknown")
 
 
 if __name__ == "__main__":

@@ -13,8 +13,10 @@
 # limitations under the License.
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from ollama import ListResponse
 from openai import ContentFilterFinishReasonError, LengthFinishReasonError, OpenAI
 
 
@@ -36,10 +38,50 @@ def translate_tools_for_openai(messages: List[Dict[str, Any]]) -> List[Dict[str,
     return messages
 
 
+def convert_openai_models_to_ollama_response(openai_models_data) -> ListResponse:
+    """
+    Converts the output of openai.client.list() into ollama's ListResponse format.
+
+    Args:
+        openai_models_data: The output of openai.client.list(), which is a SyncPage[Model] object.
+
+    Returns:
+        An instance of ollama's ListResponse.
+    """
+    ollama_models = []
+    for openai_model in openai_models_data.data:
+        # Convert creation time to datetime with UTC timezone
+        modified_at = datetime.fromtimestamp(openai_model.created, tz=timezone.utc)
+
+        # Create model details matching Ollama's format
+        details = {
+            "parent_model": "",
+            "format": "unknown",
+            "family": "openai",
+            "families": ["openai"],
+            "parameter_size": "unknown",
+            "quantization_level": "unknown"
+        }
+
+        model = {
+            "model": openai_model.id,
+            "modified_at": modified_at,
+            "digest": "unknown",
+            "size": 0,
+            "details": details
+        }
+        ollama_models.append(ListResponse.Model(**model))
+
+    return ListResponse(models=ollama_models)
+
+
 class OpenAIWrapper:
     def __init__(self, api_key: str, max_tokens: int = 4096):
         self.client = OpenAI(api_key=api_key)
         self.max_tokens = max_tokens
+
+    def list(self) -> ListResponse:
+        return convert_openai_models_to_ollama_response(self.client.models.list())
 
     def chat(
         self,
