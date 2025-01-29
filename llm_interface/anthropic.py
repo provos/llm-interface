@@ -51,7 +51,7 @@ def translate_tools_for_anthropic(tools: List[Dict[str, Any]]) -> List[Dict[str,
 
 
 def translate_messages_for_anthropic(
-    messages: List[Dict[str, Any]]
+    messages: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
     Translate messages from Ollama/API format to Anthropic format.
@@ -111,7 +111,7 @@ def translate_messages_for_anthropic(
 
 
 def convert_anthropic_models_to_ollama_response(
-    models_data: Dict[str, Any]
+    models_data: Dict[str, Any],
 ) -> ListResponse:
     """
     Converts Anthropic model list API response to Ollama format.

@@ -60,7 +60,7 @@ def convert_openai_models_to_ollama_response(openai_models_data) -> ListResponse
             "family": "openai",
             "families": ["openai"],
             "parameter_size": "unknown",
-            "quantization_level": "unknown"
+            "quantization_level": "unknown",
         }
 
         model = {
@@ -68,7 +68,7 @@ def convert_openai_models_to_ollama_response(openai_models_data) -> ListResponse
             "modified_at": modified_at,
             "digest": "unknown",
             "size": 0,
-            "details": details
+            "details": details,
         }
         ollama_models.append(ListResponse.Model(**model))
 
