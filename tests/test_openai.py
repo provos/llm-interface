@@ -1,7 +1,6 @@
-import datetime
 import unittest
-from unittest.mock import MagicMock, Mock, patch
 from datetime import datetime, timezone
+from unittest.mock import MagicMock, Mock, patch
 
 from openai import ContentFilterFinishReasonError, LengthFinishReasonError
 from openai.pagination import SyncPage
@@ -136,7 +135,12 @@ class TestOpenAIWrapper(unittest.TestCase):
         # Create mock model data
         models_data = [
             Model(id="gpt-4", created=1687882411, object="model", owned_by="openai"),
-            Model(id="gpt-3.5-turbo", created=1677610602, object="model", owned_by="openai"),
+            Model(
+                id="gpt-3.5-turbo",
+                created=1677610602,
+                object="model",
+                owned_by="openai",
+            ),
         ]
         mock_response = SyncPage[Model](data=models_data, object="list")
 
@@ -156,8 +160,7 @@ class TestOpenAIWrapper(unittest.TestCase):
         model = response["models"][0]
         self.assertEqual(model["model"], "gpt-4")
         self.assertEqual(
-            model["modified_at"],
-            datetime.fromtimestamp(1687882411, tz=timezone.utc)
+            model["modified_at"], datetime.fromtimestamp(1687882411, tz=timezone.utc)
         )
         self.assertEqual(model["digest"], "unknown")
         self.assertEqual(model["size"], 0)

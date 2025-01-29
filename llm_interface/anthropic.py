@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timezone
+from datetime import datetime
 
 from anthropic import Anthropic, APIError
 from ollama import ListResponse
@@ -110,7 +110,9 @@ def translate_messages_for_anthropic(
     return translated_messages
 
 
-def convert_anthropic_models_to_ollama_response(models_data: Dict[str, Any]) -> ListResponse:
+def convert_anthropic_models_to_ollama_response(
+    models_data: Dict[str, Any]
+) -> ListResponse:
     """
     Converts Anthropic model list API response to Ollama format.
 
@@ -123,7 +125,9 @@ def convert_anthropic_models_to_ollama_response(models_data: Dict[str, Any]) -> 
     ollama_models = []
     for model_data in models_data["data"]:
         # Convert creation time from ISO format to datetime
-        created_at = datetime.fromisoformat(model_data["created_at"].replace('Z', '+00:00'))
+        created_at = datetime.fromisoformat(
+            model_data["created_at"].replace("Z", "+00:00")
+        )
 
         model = {
             "model": model_data["id"],
@@ -137,8 +141,8 @@ def convert_anthropic_models_to_ollama_response(models_data: Dict[str, Any]) -> 
                 "families": ["claude"],
                 "parameter_size": "unknown",
                 "quantization_level": "unknown",
-                "display_name": model_data["display_name"]
-            }
+                "display_name": model_data["display_name"],
+            },
         }
         ollama_models.append(ListResponse.Model(**model))
 
@@ -237,15 +241,9 @@ class AnthropicWrapper:
         Returns a list of available Anthropic models in Ollama format.
         Uses the Anthropic API to get the current list of models.
         """
-        headers = {
-            "x-api-key": self.api_key,
-            "anthropic-version": "2023-06-01"
-        }
+        headers = {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"}
 
-        response = requests.get(
-            "https://api.anthropic.com/v1/models",
-            headers=headers
-        )
+        response = requests.get("https://api.anthropic.com/v1/models", headers=headers)
         response.raise_for_status()
 
         return convert_anthropic_models_to_ollama_response(response.json())
