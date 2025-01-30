@@ -43,6 +43,10 @@ class TestMockLLM(unittest.TestCase):
                     street="123 Main St", city="Springfield", country="USA"
                 ),
             ),
+            MockLLMResponse(
+                pattern=r"Get raw string",
+                response_string="This is a raw string response",
+            ),
         ]
         self.mock_llm = MockLLM(responses=self.responses)
 
@@ -140,6 +144,15 @@ class TestMockLLM(unittest.TestCase):
 
         self.assertIsInstance(result, Person)
         self.assertEqual(result.name, "Alice")
+
+    def test_string_response(self):
+        """Test that string responses work correctly."""
+        result = self.mock_llm.chat(
+            messages=[{"role": "user", "content": "Get raw string"}]
+        )
+
+        self.assertIsInstance(result, str)
+        self.assertEqual(result, "This is a raw string response")
 
 
 if __name__ == "__main__":

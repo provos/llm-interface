@@ -14,6 +14,7 @@ class MockLLMResponse:
         self,
         pattern: Union[str, Pattern],
         response: Optional[BaseModel] = None,
+        response_string: Optional[str] = None,
         raise_exception: bool = False,
         exception: Optional[Exception] = None,
     ):
@@ -21,11 +22,13 @@ class MockLLMResponse:
         Args:
             pattern: Regex pattern to match against the full prompt
             response: Pydantic object to return when pattern matches
+            response_string: String to return when pattern matches (do not specify both response and response_string)
             raise_exception: If True, raise an exception instead of returning response
             exception: Specific exception to raise (defaults to ValueError if not specified)
         """
         self.pattern = re.compile(pattern) if isinstance(pattern, str) else pattern
         self.response = response
+        self.response_string = response_string
         self.raise_exception = raise_exception
         self.exception = exception or ValueError("Mock LLM error")
 
@@ -74,6 +77,9 @@ class MockLLM(LLMInterface):
             if mock_response.pattern.search(full_prompt):
                 if mock_response.raise_exception:
                     raise mock_response.exception
+
+                if mock_response.response_string:
+                    return mock_response.response_string
 
                 if mock_response.response is None:
                     return None
