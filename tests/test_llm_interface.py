@@ -486,6 +486,85 @@ class TestLLMInterface(unittest.TestCase):
         chat_kwargs = self.mock_client.chat.call_args[1]
         self.assertEqual(chat_kwargs["format"], TestStructure.model_json_schema())
 
+    def test_create_prompt_hash(self):
+        # Test that different inputs create different hashes
+        base_hash = self.llm_interface._create_prompt_hash(
+            model_name="model1",
+            message_content="test message",
+            tool_content="test tool",
+            temperature=0.7,
+        )
+
+        # Different model name should create different hash
+        different_model_hash = self.llm_interface._create_prompt_hash(
+            model_name="model2",
+            message_content="test message",
+            tool_content="test tool",
+            temperature=0.7,
+        )
+        self.assertNotEqual(base_hash, different_model_hash)
+
+        # Different temperature should create different hash
+        different_temp_hash = self.llm_interface._create_prompt_hash(
+            model_name="model1",
+            message_content="test message",
+            tool_content="test tool",
+            temperature=0.8,
+        )
+        self.assertNotEqual(base_hash, different_temp_hash)
+
+        # Different message should create different hash
+        different_message_hash = self.llm_interface._create_prompt_hash(
+            model_name="model1",
+            message_content="different message",
+            tool_content="test tool",
+            temperature=0.7,
+        )
+        self.assertNotEqual(base_hash, different_message_hash)
+
+        # Different tool content should create different hash
+        different_tool_hash = self.llm_interface._create_prompt_hash(
+            model_name="model1",
+            message_content="test message",
+            tool_content="different tool",
+            temperature=0.7,
+        )
+        self.assertNotEqual(base_hash, different_tool_hash)
+
+        # Identical inputs should create identical hash
+        identical_hash = self.llm_interface._create_prompt_hash(
+            model_name="model1",
+            message_content="test message",
+            tool_content="test tool",
+            temperature=0.7,
+        )
+        self.assertEqual(base_hash, identical_hash)
+
+        # No temperature should be different from with temperature
+        no_temp_hash = self.llm_interface._create_prompt_hash(
+            model_name="model1",
+            message_content="test message",
+            tool_content="test tool",
+        )
+        self.assertNotEqual(base_hash, no_temp_hash)
+
+        self.assertEqual(
+            6,
+            len(
+                set(
+                    [
+                        base_hash,
+                        different_model_hash,
+                        different_temp_hash,
+                        different_message_hash,
+                        different_tool_hash,
+                        identical_hash,
+                        no_temp_hash,
+                    ]
+                )
+            ),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

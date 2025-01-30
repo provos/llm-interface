@@ -123,6 +123,21 @@ class LLMInterface:
             self.logger.error("Tool '%s' not found.", tool_name)
             return []
 
+    def _create_prompt_hash(
+        self,
+        model_name: str,
+        message_content: str,
+        tool_content: str,
+        temperature: Optional[float] = None,
+    ) -> str:
+        """Create a hash of the prompt for caching."""
+        return self._generate_hash(
+            model_name
+            + (f"-{temperature}" if temperature else "")
+            + message_content
+            + tool_content
+        )
+
     def _cached_chat(
         self,
         messages: List[Dict[str, str]],
@@ -135,10 +150,11 @@ class LLMInterface:
         tool_content = ""
         if tools:
             tool_content = "".join([f"{t.name}{t.description}" for t in tools])
-        prompt_hash = self._generate_hash(
-            self.model_name + f"-{temperature}"
-            if temperature
-            else "" + message_content + tool_content
+        prompt_hash = self._create_prompt_hash(
+            model_name=self.model_name,
+            message_content=message_content,
+            tool_content=tool_content,
+            temperature=temperature,
         )
 
         self.logger.info("Chatting with messages: %s", messages)
