@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from ollama import Client
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from llm_interface import LLMInterface, tool
 from llm_interface.testing.helpers import MockCache
@@ -564,6 +564,175 @@ class TestLLMInterface(unittest.TestCase):
                 )
             ),
         )
+
+    def test_inject_thinking_if_needed_adds_field(self):
+        # Test model without thinking field
+        class TestModel(BaseModel):
+            field1: str
+            field2: int
+
+        # Get new model with thinking field
+        new_model = self.llm_interface._inject_thinking_if_needed(TestModel)
+
+        # Check that the new model has the thinking field
+        self.assertIn("thinking", new_model.model_fields)
+        self.assertEqual(new_model.model_fields["thinking"].annotation, str)
+        self.assertTrue(new_model.model_fields["thinking"].is_required())
+
+        # Check that original fields are preserved
+        self.assertIn("field1", new_model.model_fields)
+        self.assertIn("field2", new_model.model_fields)
+
+        # Verify we can create an instance with the new model
+        instance = new_model(field1="test", field2=42, thinking="processing...")
+        self.assertEqual(instance.thinking, "processing...")
+        self.assertEqual(instance.field1, "test")
+        self.assertEqual(instance.field2, 42)
+
+    def test_inject_thinking_if_needed_preserves_existing(self):
+        # Test model that already has thinking field
+        class TestModelWithThinking(BaseModel):
+            field1: str
+            thinking: str
+
+        # Should return the same model if thinking field exists
+        same_model = self.llm_interface._inject_thinking_if_needed(
+            TestModelWithThinking
+        )
+
+        # Verify it's the same class
+        self.assertEqual(same_model, TestModelWithThinking)
+
+        # Verify we can still create an instance
+        instance = same_model(field1="test", thinking="already thinking")
+        self.assertEqual(instance.thinking, "already thinking")
+        self.assertEqual(instance.field1, "test")
+
+    def test_inject_thinking_if_needed_inheritance(self):
+        # Test that inheritance works correctly
+        class BaseTestModel(BaseModel):
+            base_field: str
+
+        class DerivedModel(BaseTestModel):
+            derived_field: int
+
+        # Get new model with thinking field
+        new_model = self.llm_interface._inject_thinking_if_needed(DerivedModel)
+
+        # Check that all fields are present including inherited ones
+        self.assertIn("thinking", new_model.model_fields)
+        self.assertIn("base_field", new_model.model_fields)
+        self.assertIn("derived_field", new_model.model_fields)
+
+        # Verify we can create an instance with all fields
+        instance = new_model(
+            base_field="base", derived_field=42, thinking="processing..."
+        )
+        self.assertEqual(instance.base_field, "base")
+        self.assertEqual(instance.derived_field, 42)
+        self.assertEqual(instance.thinking, "processing...")
+
+    def test_inject_thinking_if_needed_field_order(self):
+        # Test model without thinking field
+        class TestModel(BaseModel):
+            field1: str
+            field2: int
+
+        # Get new model with thinking field
+        new_model = self.llm_interface._inject_thinking_if_needed(TestModel)
+
+        # Get list of field names in order
+        field_names = list(new_model.model_fields.keys())
+        print(field_names)
+
+        # Verify thinking is the first field
+        self.assertEqual(field_names[0], "thinking")
+
+        # Verify other fields follow
+        self.assertEqual(field_names[1:], ["field1", "field2"])
+
+        # Verify we can still create an instance and all fields work
+        instance = new_model(thinking="processing...", field1="test", field2=42)
+        self.assertEqual(
+            instance.model_dump_json(),
+            '{"thinking":"processing...","field1":"test","field2":42}',
+        )
+
+    def test_inject_thinking_if_needed_preserves_field_order(self):
+        # Test model with specific field order
+        class OrderedTestModel(BaseModel):
+            zfirst: str = Field(description="This should be first")
+            second: int = Field(description="This should be second")
+            third: bool = Field(description="This should be third")
+
+        # Verify original model field order
+        original_fields = list(OrderedTestModel.model_fields.keys())
+        self.assertEqual(original_fields, ["zfirst", "second", "third"])
+
+        # Get new model with thinking field
+        new_model = self.llm_interface._inject_thinking_if_needed(OrderedTestModel)
+
+        # Verify thinking is first, followed by original fields in order
+        new_fields = list(new_model.model_fields.keys())
+        self.assertEqual(new_fields, ["thinking", "zfirst", "second", "third"])
+
+        # Create an instance and verify JSON serialization order
+        instance = new_model(
+            thinking="processing...", zfirst="test", second=42, third=True
+        )
+        self.assertEqual(
+            instance.model_dump_json(),
+            '{"thinking":"processing...","zfirst":"test","second":42,"third":true}',
+        )
+
+    def test_generate_pydantic_with_thinking_injection(self):
+        # Create a LLMInterface that requires thinking
+        llm = LLMInterface(
+            model_name="llama2",
+            client=self.mock_client,
+            requires_thinking=True,
+            support_structured_outputs=True,
+        )
+        llm.disk_cache = MockCache()
+
+        # Create a simple model without thinking field
+        class SimpleResponse(BaseModel):
+            answer: str
+            confidence: float
+
+        # Mock a response that includes thinking
+        mock_response = {
+            "thinking": "Let me consider this carefully...",
+            "answer": "Yes",
+            "confidence": 0.95,
+        }
+        self.mock_client.chat.return_value = {
+            "message": {"content": json.dumps(mock_response)}
+        }
+
+        # Generate response
+        response = llm.generate_pydantic(
+            prompt_template="Should we proceed?",
+            output_schema=SimpleResponse,
+            system="Be thoughtful",
+        )
+
+        # Verify that the response is of the original type (without thinking)
+        self.assertIsInstance(response, SimpleResponse)
+
+        # Verify the thinking field is not present in the final response
+        self.assertFalse(hasattr(response, "thinking"))
+
+        # Verify other fields are preserved
+        self.assertEqual(response.answer, "Yes")
+        self.assertEqual(response.confidence, 0.95)
+
+        # Verify that the schema passed to the model included thinking
+        chat_kwargs = self.mock_client.chat.call_args[1]
+        schema = chat_kwargs["format"]
+        self.assertIn("thinking", schema["properties"])
+        self.assertIn("answer", schema["properties"])
+        self.assertIn("confidence", schema["properties"])
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 import diskcache
 from dotenv import load_dotenv
 from ollama import Client, ListResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, create_model
 
 from .llm_tool import Tool
 from .pydantic_output_parser import MinimalPydanticOutputParser
@@ -39,6 +39,49 @@ class NoCache:
 
 
 class LLMInterface:
+    """
+    A unified interface for interacting with various Language Learning Models (LLMs).
+
+    This class provides a consistent way to interact with different LLM providers
+    (e.g., Ollama, OpenAI, Anthropic) while handling caching, logging, tool execution,
+    and structured output generation. It supports both raw text generation and
+    schema-validated outputs using Pydantic models.
+
+    Attributes:
+        model_name (str): Name of the LLM model to use.
+        log_dir (str): Path in which to store the logs from the LLMInterface.
+        client: The underlying LLM client instance (e.g., Ollama Client, OpenAI client).
+        support_json_mode (bool): Whether the model supports JSON output mode.
+        support_structured_outputs (bool): Whether the model supports structured outputs.
+        support_system_prompt (bool): Whether the model supports system prompts.
+        requires_thinking (bool): Whether the model requires a 'thinking' field in the output to work.
+        disk_cache: Cache instance for storing and retrieving model responses.
+
+    Example:
+        >>> llm = LLMInterface(
+        ...     model_name="llama2",
+        ...     log_dir="logs",
+        ...     support_json_mode=True
+        ... )
+        >>> response = llm.chat([
+        ...     {"role": "user", "content": "What is the capital of France?"}
+        ... ])
+        >>> print(response)
+        'The capital of France is Paris.'
+
+        >>> # Using with Pydantic models for structured output
+        >>> from pydantic import BaseModel
+        >>> class CityInfo(BaseModel):
+        ...     city: str
+        ...     country: str
+        ...     population: int
+        >>> result = llm.generate_pydantic(
+        ...     "Describe Paris",
+        ...     output_schema=CityInfo,
+        ...     system="You are a helpful assistant."
+        ... )
+    """
+
     def __init__(
         self,
         model_name: str = "llama2",
@@ -48,6 +91,7 @@ class LLMInterface:
         support_json_mode: bool = True,
         support_structured_outputs: bool = False,
         support_system_prompt: bool = True,
+        requires_thinking: bool = False,
         use_cache: bool = True,
     ):
         self.model_name = model_name
@@ -55,6 +99,7 @@ class LLMInterface:
         self.support_json_mode = support_json_mode
         self.support_structured_outputs = support_structured_outputs
         self.support_system_prompt = support_system_prompt
+        self.requires_thinking = requires_thinking
 
         self.logger = setup_logging(
             logs_dir=log_dir, logs_prefix="llm_interface", logger_name=__name__
@@ -72,6 +117,42 @@ class LLMInterface:
     def list(self) -> ListResponse:
         """List available models."""
         return self.client.list()
+
+    def _inject_thinking_if_needed(
+        self, output_object: Type[BaseModel]
+    ) -> Type[BaseModel]:
+        """
+        Injects a 'thinking' field into the BaseModel if it doesn't exist.
+
+        Args:
+            output_object: The original Pydantic model class
+
+        Returns:
+            A new Pydantic model class with the thinking field added as the first field,
+            or the original if it already has the thinking field.
+        """
+        # Check if thinking field already exists
+        if "thinking" in output_object.model_fields:
+            return output_object
+
+        # Create ordered field definitions with thinking first
+        field_definitions = {
+            "thinking": (str, Field(..., description="Model's thinking process")),
+        }
+
+        # Add all existing fields from the original model
+        for field_name, field in output_object.model_fields.items():
+            field_definitions[field_name] = (
+                field.annotation,
+                field.default if field.default != ... else ...,
+            )
+
+        # Create new model with ordered fields
+        new_model = create_model(
+            f"{output_object.__name__}WithThinking", **field_definitions
+        )
+
+        return new_model
 
     def _execute_tool(
         self, tool_call: Dict[str, Any], tools: List[Tool]
@@ -318,6 +399,10 @@ class LLMInterface:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": formatted_prompt})
 
+        new_output_schema = output_schema
+        if self.requires_thinking:
+            new_output_schema = self._inject_thinking_if_needed(output_schema)
+
         iteration = 0
         while iteration < 3:
             iteration += 1
@@ -325,7 +410,7 @@ class LLMInterface:
             raw_response = self.chat(
                 messages=messages,
                 temperature=temperature,
-                response_schema=output_schema,
+                response_schema=new_output_schema,
                 tools=tools,
             )
 
@@ -387,6 +472,11 @@ class LLMInterface:
 
         if debug_saver is not None:
             debug_saver(formatted_prompt, kwargs, response)
+
+        if output_schema != new_output_schema and response is not None:
+            dump = response.model_dump()
+            dump.pop("thinking", None)  # Remove the thinking field from the response
+            response = output_schema.model_validate(dump)
 
         return response
 

@@ -104,6 +104,7 @@ def llm_from_config(
                 client = RemoteOllama(ssh_connection=ssh, model_name=model_name)
             else:
                 client = None
+            requires_thinking = model_name.lower().startswith("deepseek-r")
             return LLMInterface(
                 model_name=model_name,
                 log_dir=log_dir,
@@ -111,6 +112,7 @@ def llm_from_config(
                 host=host,
                 support_json_mode=True,
                 support_structured_outputs=supports_structured,
+                requires_thinking=requires_thinking,
                 use_cache=use_cache,
             )
 
