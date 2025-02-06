@@ -294,7 +294,10 @@ class LLMInterface:
                 self.logger.info("Chatting with messages: %s", current_messages)
 
             # Cache the response with hashed prompt as key
-            self.disk_cache.set(prompt_hash, response)
+            try:
+                self.disk_cache.set(prompt_hash, response)
+            except Exception as e:
+                self.logger.error("Error caching response: %s", e)
 
         if "error" in response:
             self.logger.error("Error in chat response: %s", response["error"])
