@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "llm-interface"
-version = "0.1.6"
+version = "0.1.7"
 description = "A flexible interface for working with various LLM providers"
 authors = ["Niels Provos <provos@gmail.com>"]
 license = "Apache-2.0"
