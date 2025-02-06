@@ -1,4 +1,6 @@
 import os
+import re
+from datetime import datetime
 from typing import Literal, Optional
 
 from .anthropic import AnthropicWrapper
@@ -6,6 +8,63 @@ from .llm_interface import LLMInterface
 from .openai import OpenAIWrapper
 from .remote_ollama import RemoteOllama
 from .ssh import SSHConnection
+
+
+def _parse_model_date(model_name: str) -> Optional[datetime]:
+    """Extract date from model name if present."""
+    date_match = re.search(r"(\d{4})-(\d{1,2})-(\d{1,2})", model_name)
+    if date_match:
+        try:
+            return datetime.strptime(date_match.group(0), "%Y-%m-%d")
+        except ValueError:
+            return None
+    return None
+
+
+def supports_structured_output(model_name: str) -> bool:
+    """
+    Check if a model supports structured outputs based on its name and version date.
+
+    Args:
+        model_name: Name of the OpenAI model
+
+    Returns:
+        bool: Whether the model supports structured outputs
+    """
+    # Models that always support structured outputs (no date requirements)
+    base_models = {
+        "gpt-4o",
+        "gpt-4o-mini",
+        "o3-mini",
+        "o1",
+    }
+
+    # Models with minimum date requirements
+    dated_model_requirements = {
+        "gpt-4o-mini": datetime(2024, 7, 18),
+        "gpt-4o": datetime(2024, 8, 6),
+        "o3-mini": datetime(2025, 1, 31),
+        "o1": datetime(2024, 12, 17),
+    }
+
+    # First check for exact match in base models
+    if model_name in base_models:
+        return True
+
+    # Check if model has a date
+    model_date = _parse_model_date(model_name)
+    if not model_date:
+        return False
+
+    # Extract base model name (without date)
+    base_model = re.sub(r"-\d{4}-\d{1,2}-\d{1,2}", "", model_name)
+
+    # If we have a base model with date requirements, check the date
+    if base_model in dated_model_requirements:
+        required_date = dated_model_requirements[base_model]
+        return model_date >= required_date
+
+    return False
 
 
 def llm_from_config(
@@ -62,16 +121,11 @@ def llm_from_config(
             if api_key is None:
                 raise ValueError("OPENAI_API_KEY not found in environment variables")
             wrapper = OpenAIWrapper(api_key=api_key, max_tokens=max_tokens)
-            # add gpt-4o once the switch is made
-            support_structured_outputs = model_name in [
-                "gpt-4o-mini",
-                "gpt-4o-mini-2024-07-18",
-                "gpt-4o-2024-08-06",
-                "gpt-4o-2024-11-20",
-                "gpt-4o",
-            ]
+
+            support_structured_outputs = supports_structured_output(model_name)
             support_json_mode = model_name not in ["o1-mini", "o1-preview"]
             support_system_prompt = model_name not in ["o1-mini", "o1-preview"]
+
             return LLMInterface(
                 model_name=model_name,
                 log_dir=log_dir,
