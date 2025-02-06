@@ -44,6 +44,9 @@ def llm_client(request):
         use_cache=False,
     )
 
+    # force structured output generation
+    client.support_structured_outputs = True
+
     return client
 
 
