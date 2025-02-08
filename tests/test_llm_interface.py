@@ -1,5 +1,6 @@
 import json
 import unittest
+from typing import Optional
 from unittest.mock import Mock, patch
 
 from ollama import Client
@@ -733,6 +734,44 @@ class TestLLMInterface(unittest.TestCase):
         self.assertIn("thinking", schema["properties"])
         self.assertIn("answer", schema["properties"])
         self.assertIn("confidence", schema["properties"])
+
+    def test_generate_pydantic_with_extra_validation(self):
+        # Create a dummy Pydantic model as output schema
+        class ValidationTestModel(BaseModel):
+            value: int
+            description: str
+
+        # Create an extra validation function that checks if value is positive
+        def validate_positive_value(model: ValidationTestModel) -> Optional[str]:
+            if model.value <= 0:
+                return "Value must be positive"
+            return None
+
+        # Mock responses: first an invalid response, then a valid one
+        self.mock_client.chat.side_effect = [
+            {"message": {"content": '{"value": -1, "description": "negative"}'}},
+            {"message": {"content": '{"value": 42, "description": "positive"}'}},
+        ]
+
+        # Generate response with extra validation
+        response = self.llm_interface.generate_pydantic(
+            prompt_template="Generate a value",
+            output_schema=ValidationTestModel,
+            system="Be helpful",
+            extra_validation=validate_positive_value,
+        )
+
+        # Verify that the final response passes validation
+        self.assertIsNotNone(response)
+        self.assertEqual(response.value, 42)
+        self.assertEqual(response.description, "positive")
+
+        # Verify that chat was called twice due to validation failure
+        self.assertEqual(self.mock_client.chat.call_count, 2)
+
+        # Check that the second call included the validation error message
+        second_call_messages = self.mock_client.chat.call_args_list[1][1]["messages"]
+        self.assertIn("Value must be positive", second_call_messages[-1]["content"])
 
 
 if __name__ == "__main__":
