@@ -226,6 +226,29 @@ class LLMInterface:
         temperature: Optional[float] = None,
         response_schema: Optional[Type[BaseModel]] = None,
     ) -> str:
+        """Execute a chat conversation with caching and optional tool execution.
+
+        This method handles caching of chat responses and supports structured outputs,
+        JSON mode, and tool execution. It will retrieve cached responses when available
+        or make new API calls when needed.
+
+        Args:
+            messages (List[Dict[str, str]]): List of message dictionaries with 'role' and 'content' keys
+            tools (Optional[List[Tool]], optional): List of Tool objects that can be called by the LLM. Defaults to None.
+            temperature (Optional[float], optional): Sampling temperature for response generation. Defaults to None.
+            response_schema (Optional[Type[BaseModel]], optional): Pydantic model for structured output. Defaults to None.
+
+        Returns:
+            str: The content of the chat response message
+
+        Raises:
+            ValueError: If the model returns an error or refuses the request
+
+        Note:
+            - Caching is based on a hash of the model name, messages, tools, and temperature
+            - Supports up to 5 sequential tool calls per conversation
+            - Compatible with both OpenAI and Ollama clients
+        """
         # Concatenate all messages to use as the cache key
         message_content = "".join([msg["role"] + msg["content"] for msg in messages])
         tool_content = ""
@@ -301,8 +324,10 @@ class LLMInterface:
 
         if "error" in response:
             self.logger.error("Error in chat response: %s", response["error"])
+            raise ValueError("Generic error: " + response["error"])
         elif "refusal" in response:
             self.logger.error("Model refused the request: %s", response["refusal"])
+            raise ValueError("Model refusal: " + response["refusal"])
 
         return response["message"]["content"]
 
@@ -313,6 +338,27 @@ class LLMInterface:
         temperature: Optional[float] = None,
         response_schema: Optional[Type[BaseModel]] = None,
     ) -> str:
+        """
+        Sends a chat request to the LLM and returns the response.
+
+        This method handles both regular chat responses and structured responses based on the provided schema.
+
+        Args:
+            messages (List[Dict[str, str]]): List of message dictionaries containing the conversation history.
+                Each message should have 'role' and 'content' keys.
+            tools (Optional[List[Tool]], optional): List of tools/functions available to the LLM. Defaults to None.
+            temperature (Optional[float], optional): Sampling temperature for response generation.
+                Higher values make output more random, lower values more deterministic. Defaults to None.
+            response_schema (Optional[Type[BaseModel]], optional): Pydantic model defining the expected response structure.
+                If provided, the response will be parsed according to this schema. Defaults to None.
+
+        Returns:
+            str: The LLM's response text, stripped of leading/trailing whitespace if string,
+                or the structured response if a schema was provided.
+
+        Raises:
+            ValueError: If the model returns an error or refuses the request
+        """
         response = self._cached_chat(
             messages=messages,
             tools=tools,
@@ -406,16 +452,30 @@ class LLMInterface:
         if self.requires_thinking:
             new_output_schema = self._inject_thinking_if_needed(output_schema)
 
+        response = None
         iteration = 0
         while iteration < 3:
             iteration += 1
 
-            raw_response = self.chat(
-                messages=messages,
-                temperature=temperature,
-                response_schema=new_output_schema,
-                tools=tools,
-            )
+            try:
+                raw_response = self.chat(
+                    messages=messages,
+                    temperature=temperature,
+                    response_schema=new_output_schema,
+                    tools=tools,
+                )
+            except ValueError as e:
+                raw_response = None
+                messages.extend(
+                    [
+                        {"role": "assistant", "content": str(e)},
+                        {
+                            "role": "user",
+                            "content": "Try again while avoiding the previous error.",
+                        },
+                    ]
+                )
+                continue
 
             if self.support_structured_outputs:
                 # If the model supports structured outputs, we should get a Pydantic object directly

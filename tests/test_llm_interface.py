@@ -773,6 +773,100 @@ class TestLLMInterface(unittest.TestCase):
         second_call_messages = self.mock_client.chat.call_args_list[1][1]["messages"]
         self.assertIn("Value must be positive", second_call_messages[-1]["content"])
 
+    def test_generate_pydantic_with_model_error(self):
+        # Create a dummy Pydantic model as output schema
+        class ErrorTestModel(BaseModel):
+            value: str
+
+        # Mock responses: first an error, then a valid response
+        self.mock_client.chat.side_effect = [
+            {"error": "Model overloaded"},
+            {"message": {"content": '{"value": "success"}'}},
+        ]
+
+        # Generate response
+        response = self.llm_interface.generate_pydantic(
+            prompt_template="Test prompt",
+            output_schema=ErrorTestModel,
+            system="Test system",
+        )
+
+        # Verify that we got a valid response after retry
+        self.assertIsNotNone(response)
+        self.assertEqual(response.value, "success")
+
+        # Verify chat was called twice
+        self.assertEqual(self.mock_client.chat.call_count, 2)
+
+        # Verify the retry message contains the error
+        second_call_messages = self.mock_client.chat.call_args_list[1][1]["messages"]
+        self.assertEqual(len(second_call_messages), 4)  # system + user + error + retry
+        self.assertIn("Model overloaded", second_call_messages[2]["content"])
+        self.assertIn("Try again", second_call_messages[3]["content"])
+
+    def test_generate_pydantic_with_model_refusal(self):
+        # Create a dummy Pydantic model as output schema
+        class RefusalTestModel(BaseModel):
+            value: str
+
+        # Mock responses: first a refusal, then a valid response
+        self.mock_client.chat.side_effect = [
+            {"refusal": "Content policy violation"},
+            {"message": {"content": '{"value": "appropriate content"}'}},
+        ]
+
+        # Generate response
+        response = self.llm_interface.generate_pydantic(
+            prompt_template="Test prompt",
+            output_schema=RefusalTestModel,
+            system="Test system",
+        )
+
+        # Verify that we got a valid response after retry
+        self.assertIsNotNone(response)
+        self.assertEqual(response.value, "appropriate content")
+
+        # Verify chat was called twice
+        self.assertEqual(self.mock_client.chat.call_count, 2)
+
+        # Verify the retry message contains the refusal
+        second_call_messages = self.mock_client.chat.call_args_list[1][1]["messages"]
+        self.assertEqual(
+            len(second_call_messages), 4
+        )  # system + user + refusal + retry
+        self.assertIn("Content policy violation", second_call_messages[2]["content"])
+        self.assertIn("Try again", second_call_messages[3]["content"])
+
+    def test_generate_pydantic_with_persistent_error(self):
+        # Create a dummy Pydantic model as output schema
+        class ErrorTestModel(BaseModel):
+            value: str
+
+        # Mock responses: three consecutive errors
+        self.mock_client.chat.side_effect = [
+            {"error": "Error 1"},
+            {"error": "Error 2"},
+            {"error": "Error 3"},
+        ]
+
+        # Generate response
+        response = self.llm_interface.generate_pydantic(
+            prompt_template="Test prompt",
+            output_schema=ErrorTestModel,
+            system="Test system",
+        )
+
+        # Verify that we got None after all retries failed
+        self.assertIsNone(response)
+
+        # Verify chat was called three times (maximum retries)
+        self.assertEqual(self.mock_client.chat.call_count, 3)
+
+        # Verify each retry attempt contained the previous error
+        calls = self.mock_client.chat.call_args_list
+        self.assertIn("Generic error: Error 1", calls[1][1]["messages"][2]["content"])
+        self.assertIn("Generic error: Error 2", calls[2][1]["messages"][4]["content"])
+
 
 if __name__ == "__main__":
     unittest.main()
