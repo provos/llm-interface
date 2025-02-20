@@ -38,6 +38,10 @@ class NoCache:
         pass
 
 
+class ModelError(Exception):
+    pass
+
+
 class LLMInterface:
     """
     A unified interface for interacting with various Language Learning Models (LLMs).
@@ -242,7 +246,7 @@ class LLMInterface:
             str: The content of the chat response message
 
         Raises:
-            ValueError: If the model returns an error or refuses the request
+            ModelError: If the model returns an error or refuses the request
 
         Note:
             - Caching is based on a hash of the model name, messages, tools, and temperature
@@ -324,10 +328,10 @@ class LLMInterface:
 
         if "error" in response:
             self.logger.error("Error in chat response: %s", response["error"])
-            raise ValueError("Generic error: " + response["error"])
+            raise ModelError("Generic error: " + response["error"])
         elif "refusal" in response:
             self.logger.error("Model refused the request: %s", response["refusal"])
-            raise ValueError("Model refusal: " + response["refusal"])
+            raise ModelError("Model refusal: " + response["refusal"])
 
         return response["message"]["content"]
 
@@ -357,7 +361,7 @@ class LLMInterface:
                 or the structured response if a schema was provided.
 
         Raises:
-            ValueError: If the model returns an error or refuses the request
+            ModelError: If the model returns an error or refuses the request
         """
         response = self._cached_chat(
             messages=messages,
@@ -464,7 +468,7 @@ class LLMInterface:
                     response_schema=new_output_schema,
                     tools=tools,
                 )
-            except ValueError as e:
+            except ModelError as e:
                 raw_response = None
                 messages.extend(
                     [
