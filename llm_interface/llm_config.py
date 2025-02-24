@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Literal, Optional
 
 from .anthropic import AnthropicWrapper
+from .gemini import GeminiWrapper
 from .llm_interface import LLMInterface
 from .openai import OpenAIWrapper
 from .remote_ollama import RemoteOllama
@@ -68,7 +69,9 @@ def supports_structured_output(model_name: str) -> bool:
 
 
 def llm_from_config(
-    provider: Literal["ollama", "remote_ollama", "openai"] = "ollama",
+    provider: Literal[
+        "ollama", "remote_ollama", "openai", "anthropic", "gemini"
+    ] = "ollama",
     model_name: str = "llama3",
     max_tokens: int = 4096,
     host: Optional[str] = None,
@@ -145,6 +148,20 @@ def llm_from_config(
                 log_dir=log_dir,
                 client=wrapper,
                 support_json_mode=False,
+                use_cache=use_cache,
+            )
+        case "gemini":
+            api_key = os.getenv("GEMINI_API_KEY")
+            if api_key is None:
+                raise ValueError("GEMINI_API_KEY not found in environment variables")
+            wrapper = GeminiWrapper(api_key=api_key, max_tokens=max_tokens)
+            return LLMInterface(
+                model_name=model_name,
+                log_dir=log_dir,
+                client=wrapper,
+                support_json_mode=True,
+                support_structured_outputs=True,  # Gemini supports structured outputs
+                support_system_prompt=True,
                 use_cache=use_cache,
             )
         case "ollama" | "remote_ollama":
