@@ -47,7 +47,7 @@ def translate_tools_for_gemini(tools: List[Dict[str, Any]]) -> List[Dict[str, An
 
 
 def translate_messages_for_gemini(
-    messages: List[Dict[str, Any]]
+    messages: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
     Translates messages from Ollama format to Gemini format.
