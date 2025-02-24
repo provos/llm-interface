@@ -172,12 +172,18 @@ class GeminiWrapper:
             if tools:
                 gemini_tools = translate_tools_for_gemini(tools)
                 config["tools"] = gemini_tools
-                config["tool_config"] = {"function_calling_config": {"mode": "any"}}
+                # AUTO means the model can decide when to call the function
+                # ANY means it will always call a function
+                config["tool_config"] = {"function_calling_config": {"mode": "AUTO"}}
 
             # Handle structured output if response_schema is provided
             if "response_schema" in kwargs:
                 schema = kwargs["response_schema"]
                 if isinstance(schema, type) and issubclass(schema, BaseModel):
+                    if tools:
+                        raise ValueError(
+                            "The Gemini API does not support structured output with function calling/tools."
+                        )
                     config.update(
                         {
                             "response_mime_type": "application/json",
