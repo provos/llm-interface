@@ -215,9 +215,8 @@ class OpenRouterWrapper:
         if "response_schema" in kwargs:
             schema = kwargs["response_schema"].model_json_schema()
 
-            # Remove pydantic-specific fields that might not be compatible
-            schema.pop("title", None)
-            schema.pop("description", None)
+            # Explicitly set additionalProperties to false as required by OpenAI schema validation
+            schema["additionalProperties"] = False
 
             api_params["response_format"] = {
                 "type": "json_schema",
