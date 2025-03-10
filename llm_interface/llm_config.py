@@ -7,6 +7,7 @@ from .anthropic import AnthropicWrapper
 from .gemini import GeminiWrapper
 from .llm_interface import LLMInterface
 from .openai import OpenAIWrapper
+from .openrouter import OpenRouterWrapper
 from .remote_ollama import RemoteOllama
 from .ssh import SSHConnection
 
@@ -70,7 +71,7 @@ def supports_structured_output(model_name: str) -> bool:
 
 def llm_from_config(
     provider: Literal[
-        "ollama", "remote_ollama", "openai", "anthropic", "gemini"
+        "ollama", "remote_ollama", "openai", "anthropic", "gemini", "openrouter"
     ] = "ollama",
     model_name: str = "llama3",
     max_tokens: int = 4096,
@@ -87,7 +88,7 @@ def llm_from_config(
     based on the selected provider (ollama, remote_ollama, openai, or anthropic).
 
     Args:
-        provider (Literal["ollama", "remote_ollama", "openai"]): The LLM provider to use.
+        provider (Literal["ollama", "remote_ollama", "openai", "anthropic", "gemini", "openrouter"]): The LLM provider to use.
             Defaults to "ollama".
         model_name (str): Name of the model to use. Defaults to "llama3".
         max_tokens (int): Maximum number of tokens for model responses. Defaults to 4096.
@@ -161,6 +162,33 @@ def llm_from_config(
                 client=wrapper,
                 support_json_mode=True,
                 support_structured_outputs=True,  # Gemini supports structured outputs
+                support_system_prompt=True,
+                use_cache=use_cache,
+            )
+        case "openrouter":
+            api_key = os.getenv("OPENROUTER_API_KEY")
+            if api_key is None:
+                raise ValueError(
+                    "OPENROUTER_API_KEY not found in environment variables"
+                )
+
+            # Get optional site info from env vars for analytics/rankings
+            site_url = os.getenv("OPENROUTER_SITE_URL")
+            site_name = os.getenv("OPENROUTER_SITE_NAME")
+
+            wrapper = OpenRouterWrapper(
+                api_key=api_key,
+                max_tokens=max_tokens,
+                site_url=site_url,
+                site_name=site_name,
+            )
+
+            return LLMInterface(
+                model_name=model_name,
+                log_dir=log_dir,
+                client=wrapper,
+                support_json_mode=True,
+                support_structured_outputs=True,
                 support_system_prompt=True,
                 use_cache=use_cache,
             )
