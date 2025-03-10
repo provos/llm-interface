@@ -24,7 +24,7 @@ OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
 
 def translate_tools_for_openrouter(
-    messages: List[Dict[str, Any]]
+    messages: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     """
     Translates the tools format for OpenRouter API.
