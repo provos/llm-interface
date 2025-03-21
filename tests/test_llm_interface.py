@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 from ollama import Client
 from pydantic import BaseModel, Field
 
-from llm_interface import LLMInterface, tool
+from llm_interface import LLMInterface, TokenUsage, tool
 from llm_interface.testing.helpers import MockCache
 
 
@@ -866,6 +866,160 @@ class TestLLMInterface(unittest.TestCase):
         calls = self.mock_client.chat.call_args_list
         self.assertIn("Generic error: Error 1", calls[1][1]["messages"][2]["content"])
         self.assertIn("Generic error: Error 2", calls[2][1]["messages"][4]["content"])
+
+    def test_chat_token_usage_tracking(self):
+        # Create a new TokenUsage object to track tokens for this test
+        test_token_usage = TokenUsage()
+
+        # Setup mock response with token usage information (Ollama style)
+        self.mock_client.chat.return_value = {
+            "message": {"content": "Test response"},
+            "prompt_eval_count": 50,
+            "eval_count": 30,
+        }
+
+        # Call chat with the token_usage object
+        self.llm_interface.chat(
+            messages=[{"role": "user", "content": "Test prompt"}],
+            token_usage=test_token_usage,
+        )
+
+        # Verify token usage was updated correctly
+        self.assertEqual(test_token_usage.prompt_tokens, 50)
+        self.assertEqual(test_token_usage.completion_tokens, 30)
+        self.assertEqual(test_token_usage.total_tokens, 80)  # Should add them up
+
+        # Also verify the default token usage in the interface was not affected
+        self.assertEqual(self.llm_interface.token_usage.prompt_tokens, 0)
+        self.assertEqual(self.llm_interface.token_usage.completion_tokens, 0)
+
+    def test_chat_token_usage_openai_style(self):
+        # Replace the mock client with one that returns OpenAI style responses
+        openai_mock_client = Mock()
+        self.llm_interface.client = openai_mock_client
+
+        # Setup mock response with OpenAI-style token usage
+        openai_mock_client.chat.return_value = {
+            "message": {"content": "Test response"},
+            "usage": {"prompt_tokens": 25, "completion_tokens": 15, "total_tokens": 40},
+        }
+
+        # Call chat (using default token_usage)
+        self.llm_interface.chat(messages=[{"role": "user", "content": "Test prompt"}])
+
+        # Verify token usage was updated correctly
+        self.assertEqual(self.llm_interface.token_usage.prompt_tokens, 25)
+        self.assertEqual(self.llm_interface.token_usage.completion_tokens, 15)
+        self.assertEqual(self.llm_interface.token_usage.total_tokens, 40)
+
+    def test_generate_pydantic_token_usage(self):
+        # Create a fresh TokenUsage object
+        test_token_usage = TokenUsage()
+
+        # Create a simple Pydantic model for testing
+        class SimpleModel(BaseModel):
+            value: str
+
+        # Setup mock response with token usage information
+        self.mock_client.chat.return_value = {
+            "message": {"content": '{"value": "test"}'},
+            "prompt_eval_count": 75,
+            "eval_count": 25,
+        }
+
+        # Call generate_pydantic with custom token_usage
+        response = self.llm_interface.generate_pydantic(
+            prompt_template="Test prompt",
+            output_schema=SimpleModel,
+            token_usage=test_token_usage,
+        )
+
+        # Verify token usage was updated
+        self.assertEqual(test_token_usage.prompt_tokens, 75)
+        self.assertEqual(test_token_usage.completion_tokens, 25)
+        self.assertEqual(test_token_usage.total_tokens, 100)
+
+        # Verify response was correctly parsed
+        self.assertIsInstance(response, SimpleModel)
+        self.assertEqual(response.value, "test")
+
+    def test_generate_pydantic_multiple_iterations_token_usage(self):
+        # Create a fresh TokenUsage object
+        test_token_usage = TokenUsage()
+
+        # Create a simple Pydantic model for testing
+        class SimpleModel(BaseModel):
+            value: str
+
+        # Setup sequential mock responses - first invalid, then valid
+        self.mock_client.chat.side_effect = [
+            # First call - invalid response
+            {
+                "message": {"content": "Not valid JSON"},
+                "prompt_eval_count": 50,
+                "eval_count": 10,
+            },
+            # Second call - valid response
+            {
+                "message": {"content": '{"value": "test"}'},
+                "prompt_eval_count": 100,
+                "eval_count": 20,
+            },
+        ]
+
+        # Call generate_pydantic
+        response = self.llm_interface.generate_pydantic(
+            prompt_template="Test prompt",
+            output_schema=SimpleModel,
+            token_usage=test_token_usage,
+        )
+
+        # Verify token usage accumulates across both calls
+        self.assertEqual(test_token_usage.prompt_tokens, 150)  # 50 + 100
+        self.assertEqual(test_token_usage.completion_tokens, 30)  # 10 + 20
+        self.assertEqual(test_token_usage.total_tokens, 180)  # 150 + 30
+
+        # Verify response is from the second (valid) call
+        self.assertEqual(response.value, "test")
+
+    def test_token_usage_with_cached_response(self):
+        # Create a fresh TokenUsage object
+        test_token_usage = TokenUsage()
+
+        # Use the mock cache
+        self.llm_interface.disk_cache = MockCache()
+
+        # Call chat first time - should make actual call
+        self.mock_client.chat.return_value = {
+            "message": {"content": "Test response"},
+            "prompt_eval_count": 50,
+            "eval_count": 30,
+        }
+
+        response1 = self.llm_interface.chat(
+            messages=[{"role": "user", "content": "Cached prompt"}],
+            token_usage=test_token_usage,
+        )
+
+        # Reset mock to verify no more calls are made
+        self.mock_client.chat.reset_mock()
+
+        # Call again with same prompt - should use cache
+        response2 = self.llm_interface.chat(
+            messages=[{"role": "user", "content": "Cached prompt"}],
+            token_usage=test_token_usage,
+        )
+
+        # Verify client.chat wasn't called second time
+        self.mock_client.chat.assert_not_called()
+
+        # Verify token usage shows only one set of tokens (not doubled)
+        self.assertEqual(test_token_usage.prompt_tokens, 50)
+        self.assertEqual(test_token_usage.completion_tokens, 30)
+        self.assertEqual(test_token_usage.total_tokens, 80)
+
+        # Verify responses match
+        self.assertEqual(response1, response2)
 
 
 if __name__ == "__main__":
