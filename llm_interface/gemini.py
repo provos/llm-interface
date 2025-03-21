@@ -197,6 +197,17 @@ class GeminiWrapper:
                 config=config,
             )
 
+            # Create response object
+            result = {}
+
+            # Add token usage to the response object
+            if hasattr(response, "usage_metadata"):
+                result["usage"] = {
+                    "prompt_tokens": response.usage_metadata.prompt_token_count,
+                    "completion_tokens": response.usage_metadata.candidates_token_count,
+                    "total_tokens": response.usage_metadata.total_token_count,
+                }
+
             # Check for function calls in the response
             if hasattr(response, "candidates") and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:
@@ -204,23 +215,21 @@ class GeminiWrapper:
                         hasattr(part, "function_call")
                         and part.function_call is not None
                     ):
-                        return {
-                            "message": {
-                                "content": "",
-                                "tool_calls": [
-                                    {
-                                        "id": getattr(part.function_call, "id", ""),
-                                        "name": part.function_call.name,
-                                        "arguments": json.dumps(
-                                            part.function_call.args
-                                        ),
-                                    }
-                                ],
-                            }
+                        result["message"] = {
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": getattr(part.function_call, "id", ""),
+                                    "name": part.function_call.name,
+                                    "arguments": json.dumps(part.function_call.args),
+                                }
+                            ],
                         }
+                        return result
 
             # Return regular message response
-            return {"message": {"content": response.text}}
+            result["message"] = {"content": response.text}
+            return result
 
         except Exception as e:
             logging.error(f"Error in Gemini chat: {str(e)}")
