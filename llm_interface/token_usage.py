@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Dict, Tuple
+from typing import Dict
 
 from pydantic import BaseModel
 
@@ -105,30 +105,3 @@ class TokenUsage(BaseModel):
         if self.reasoning_tokens > 0:
             result += f", {self.reasoning_tokens} reasoning"
         return result
-
-
-class TokenUsageSummary:
-    def __init__(self):
-        self.usage: Dict[Tuple[str, str], TokenUsage] = {}
-
-    def update(
-        self,
-        provider: str,
-        model: str,
-        prompt_tokens: int = 0,
-        completion_tokens: int = 0,
-        total_tokens: int = 0,
-        cached_tokens: int = 0,
-        reasoning_tokens: int = 0,
-    ):
-        key = (provider, model)
-        if key not in self.usage:
-            self.usage[key] = TokenUsage()
-
-        self.usage[key].update(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            cached_tokens=cached_tokens,
-            reasoning_tokens=reasoning_tokens,
-        )
