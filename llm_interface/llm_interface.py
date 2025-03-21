@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field, create_model
 
 from .llm_tool import Tool
 from .pydantic_output_parser import MinimalPydanticOutputParser
+from .token_usage import TokenUsage
 from .utils import setup_logging
 
 # Load environment variables from .env.local file
@@ -60,6 +61,7 @@ class LLMInterface:
         support_system_prompt (bool): Whether the model supports system prompts.
         requires_thinking (bool): Whether the model requires a 'thinking' field in the output to work.
         disk_cache: Cache instance for storing and retrieving model responses.
+        token_usage: TokenUsage instance for tracking token usage across requests.
 
     Example:
         >>> llm = LLMInterface(
@@ -117,6 +119,9 @@ class LLMInterface:
             if use_cache
             else NoCache()
         )
+
+        # Initialize token usage tracker
+        self.token_usage = TokenUsage()
 
     def list(self) -> ListResponse:
         """List available models."""
@@ -223,12 +228,13 @@ class LLMInterface:
             + tool_content
         )
 
-    def _cached_chat(
+    def _uncached_chat(
         self,
         messages: List[Dict[str, str]],
         tools: Optional[List[Tool]] = None,
         temperature: Optional[float] = None,
         response_schema: Optional[Type[BaseModel]] = None,
+        token_usage: Optional[TokenUsage] = None,
     ) -> str:
         """Execute a chat conversation with caching and optional tool execution.
 
@@ -241,6 +247,7 @@ class LLMInterface:
             tools (Optional[List[Tool]], optional): List of Tool objects that can be called by the LLM. Defaults to None.
             temperature (Optional[float], optional): Sampling temperature for response generation. Defaults to None.
             response_schema (Optional[Type[BaseModel]], optional): Pydantic model for structured output. Defaults to None.
+            token_usage (Optional[TokenUsage]): Object to track token usage. If None, uses self.token_usage.
 
         Returns:
             str: The content of the chat response message
@@ -253,6 +260,9 @@ class LLMInterface:
             - Supports up to 5 sequential tool calls per conversation
             - Compatible with both OpenAI and Ollama clients
         """
+        # Use provided token_usage or default to self.token_usage
+        token_usage = token_usage or self.token_usage
+
         # Concatenate all messages to use as the cache key
         message_content = "".join([msg["role"] + msg["content"] for msg in messages])
         tool_content = ""
@@ -297,6 +307,7 @@ class LLMInterface:
                 num_tool_calls += 1
 
                 converted_tools = [tool.to_dict() for tool in tools] if tools else []
+
                 # Make request to client using chat interface
                 response = self.client.chat(
                     model=self.model_name,
@@ -306,6 +317,23 @@ class LLMInterface:
                 )
 
                 self.logger.info("Received chat response: %s", response)
+
+                # If using Ollama which doesn't provide token counts, estimate them
+                if isinstance(self.client, Client):
+                    token_usage.update(
+                        prompt_tokens=response.get("prompt_eval_count", 0),
+                        completion_tokens=response.get("eval_count", 0),
+                    )
+                # Extract token usage information from response if available
+                elif "usage" in response:
+                    usage_data = response["usage"]
+                    token_usage.update(
+                        prompt_tokens=usage_data.get("prompt_tokens", 0),
+                        completion_tokens=usage_data.get("completion_tokens", 0),
+                        total_tokens=usage_data.get("total_tokens", 0),
+                        cached_tokens=usage_data.get("cached_tokens", 0),
+                        reasoning_tokens=usage_data.get("reasoning_tokens", 0),
+                    )
 
                 # Check if the response contains tool calls
                 tool_calls = response.get("message", {}).get("tool_calls", [])
@@ -341,6 +369,7 @@ class LLMInterface:
         tools: Optional[List[Tool]] = None,
         temperature: Optional[float] = None,
         response_schema: Optional[Type[BaseModel]] = None,
+        token_usage: Optional[TokenUsage] = None,
     ) -> str:
         """
         Sends a chat request to the LLM and returns the response.
@@ -355,6 +384,7 @@ class LLMInterface:
                 Higher values make output more random, lower values more deterministic. Defaults to None.
             response_schema (Optional[Type[BaseModel]], optional): Pydantic model defining the expected response structure.
                 If provided, the response will be parsed according to this schema. Defaults to None.
+            token_usage (Optional[TokenUsage]): Object to track token usage. If None, uses self.token_usage.
 
         Returns:
             str: The LLM's response text, stripped of leading/trailing whitespace if string,
@@ -363,11 +393,15 @@ class LLMInterface:
         Raises:
             ModelError: If the model returns an error or refuses the request
         """
-        response = self._cached_chat(
+        # Use provided token_usage or default to self.token_usage
+        token_usage = token_usage or self.token_usage
+
+        response = self._uncached_chat(
             messages=messages,
             tools=tools,
             temperature=temperature,
             response_schema=response_schema,
+            token_usage=token_usage,
         )
         self.logger.info(
             "Received chat response: %s...",
@@ -411,6 +445,7 @@ class LLMInterface:
         debug_saver: Optional[Callable[[str, Dict[str, Any], str], None]] = None,
         extra_validation: Optional[Callable[[BaseModel], Optional[str]]] = None,
         temperature: Optional[float] = None,
+        token_usage: Optional[TokenUsage] = None,
         **kwargs,
     ) -> Optional[BaseModel]:
         """
@@ -431,12 +466,16 @@ class LLMInterface:
                 which receives the prompt and the response.
             extra_validation (Optional[Callable[[BaseModel], str]]): An optional function for additional validation of
                 the generated output. It should return an error message if validation fails, otherwise None.
+            token_usage (Optional[TokenUsage]): Object to track token usage. If None, uses self.token_usage.
             **kwargs: Additional keyword arguments for populating the prompt template.
 
         Returns:
             Optional[BaseModel]: An instance of the specified Pydantic model with generated data if successful,
             or None if all attempts at generation fail or the response is invalid.
         """
+        # Use provided token_usage or default to self.token_usage
+        token_usage = token_usage or self.token_usage
+
         parser = MinimalPydanticOutputParser(pydantic_object=output_schema)
 
         formatted_prompt = self.generate_full_prompt(
@@ -467,6 +506,7 @@ class LLMInterface:
                     temperature=temperature,
                     response_schema=new_output_schema,
                     tools=tools,
+                    token_usage=token_usage,
                 )
             except ModelError as e:
                 raw_response = None

@@ -100,6 +100,7 @@ class OpenAIWrapper:
             messages (List[Dict[str, str]]): A list of dictionaries representing the conversation
                                              history, where each dictionary contains 'role' (e.g., 'system',
                                              'user', 'assistant') and 'content' (the message text).
+            tools (Optional[List[Dict[str, Any]]]): List of tools to be used in the conversation.
             **kwargs: Additional parameters that can include:
                 - model (str): The OpenAI model to be used. Defaults to 'gpt-3.5-turbo' if not specified.
                 - max_tokens (int): Maximum number of tokens for the API call. Defaults to the instance's max_tokens.
@@ -173,7 +174,19 @@ class OpenAIWrapper:
                 ),
             )
 
-            return_message = {"message": {"content": content}}
+            return_message = {
+                "message": {"content": content},
+                "usage": {
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                },
+                "done": response.choices[0].finish_reason == "stop",
+            }
+            if usage.prompt_tokens_details:
+                return_message["usage"][
+                    "cached_tokens"
+                ] = usage.prompt_tokens_details.cached_tokens
             # Check for tool calls
             if message.tool_calls:
                 return_message["message"]["tool_calls"] = [
@@ -192,6 +205,11 @@ class OpenAIWrapper:
                 "error": "Response exceeded the maximum allowed length.",
                 "content": None,
                 "done": False,
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },  # Include empty usage data
             }
         except ContentFilterFinishReasonError:
             # Handle the content filter error
@@ -199,6 +217,11 @@ class OpenAIWrapper:
                 "error": "Content was rejected by the content filter.",
                 "content": None,
                 "done": False,
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },  # Include empty usage data
             }
         except Exception as e:
             raise e

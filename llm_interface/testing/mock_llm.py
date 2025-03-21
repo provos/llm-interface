@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Pattern, Type, Union
 
 from pydantic import BaseModel
 
-from ..llm_interface import LLMInterface, NoCache
+from ..llm_interface import LLMInterface, NoCache, TokenUsage
 
 
 class MockLLMResponse:
@@ -55,12 +55,13 @@ class MockLLM(LLMInterface):
         self.responses = responses
         self.disk_cache = NoCache()
 
-    def _cached_chat(
+    def _uncached_chat(
         self,
         messages: List[Dict[str, str]],
         tools: Optional[List] = None,
         temperature: Optional[float] = None,
         response_schema: Optional[Type[BaseModel]] = None,
+        token_usage: Optional[TokenUsage] = None,
     ) -> str:
         # Reconstruct the full prompt from messages
         full_prompt = ""
@@ -70,7 +71,7 @@ class MockLLM(LLMInterface):
             elif msg["role"] == "user":
                 full_prompt += f"User: {msg['content']}\n"
 
-        logging.info(f"Mock LLM received prompt: {full_prompt}")
+        logging.info("Mock LLM received prompt: %s", full_prompt)
 
         # Try to match the prompt against our patterns
         for mock_response in self.responses:

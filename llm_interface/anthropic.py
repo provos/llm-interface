@@ -11,12 +11,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict, List, Optional
 from datetime import datetime
+from typing import Any, Dict, List, Optional
 
+import requests
 from anthropic import Anthropic, APIError
 from ollama import ListResponse
-import requests
 
 
 def translate_tools_for_anthropic(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -188,8 +188,11 @@ class AnthropicWrapper:
             "max_tokens": kwargs.get("max_tokens", self.max_tokens),
             "messages": filtered_messages,
             "model": kwargs.get("model", "claude-3-5-sonnet-20240620"),
-            "system": system_message,  # Pass the system message here
         }
+
+        # Only include system parameter if it has a value
+        if system_message is not None:
+            params["system"] = system_message
 
         # Conditionally add temperature if it exists in kwargs
         if "options" in kwargs:
@@ -204,6 +207,15 @@ class AnthropicWrapper:
         try:
             # Call the function with the constructed parameters
             response = self.client.messages.create(**params)
+
+            # Extract usage information
+            usage = response.usage
+            usage_info = {
+                "prompt_tokens": usage.input_tokens,
+                "completion_tokens": usage.output_tokens,
+                "cached_tokens": usage.cache_read_input_tokens,
+                "total_tokens": usage.input_tokens + usage.output_tokens,
+            }
 
             # Handle tool calls if present
             if any(block.type == "tool_use" for block in response.content):
@@ -223,7 +235,9 @@ class AnthropicWrapper:
                             }
                             for tool_block in tool_use_blocks
                         ],
-                    }
+                    },
+                    "usage": usage_info,
+                    "done": response.stop_reason == "end_turn",
                 }
 
             # Extract content blocks as text and simulate Ollama-like response
@@ -231,7 +245,11 @@ class AnthropicWrapper:
                 block.text for block in response.content if block.type == "text"
             )
 
-            return {"message": {"content": content}}
+            return {
+                "message": {"content": content},
+                "usage": usage_info,
+                "done": response.stop_reason == "end_turn",
+            }
 
         except APIError as e:
             raise e

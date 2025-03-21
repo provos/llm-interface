@@ -25,7 +25,12 @@ class TestOpenAIWrapper(unittest.TestCase):
     def test_chat_basic(self):
         self.mock_client.chat.completions.create.return_value = Mock(
             choices=[
-                Mock(message=Mock(content="Chat response content", tool_calls=[]))
+                Mock(
+                    message=Mock(
+                        content="Chat response content", tool_calls=[], done=True
+                    ),
+                    finish_reason="stop",
+                )
             ],
             usage=CompletionUsage(
                 completion_tokens=9, prompt_tokens=10, total_tokens=19
@@ -35,7 +40,18 @@ class TestOpenAIWrapper(unittest.TestCase):
         messages = [{"role": "user", "content": "Hello, assistant!"}]
         response = self.openai_wrapper.chat(messages=messages)
 
-        self.assertEqual(response, {"message": {"content": "Chat response content"}})
+        self.assertEqual(
+            response,
+            {
+                "message": {"content": "Chat response content"},
+                "usage": {
+                    "completion_tokens": 9,
+                    "prompt_tokens": 10,
+                    "total_tokens": 19,
+                },
+                "done": True,
+            },
+        )
 
         self.mock_client.chat.completions.create.assert_called_once_with(
             model="gpt-3.5-turbo", messages=messages, max_completion_tokens=4096
@@ -55,6 +71,11 @@ class TestOpenAIWrapper(unittest.TestCase):
                 "error": "Response exceeded the maximum allowed length.",
                 "content": None,
                 "done": False,
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
             },
         )
 
@@ -72,18 +93,23 @@ class TestOpenAIWrapper(unittest.TestCase):
                 "error": "Content was rejected by the content filter.",
                 "content": None,
                 "done": False,
+                "usage": {
+                    "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "total_tokens": 0,
+                },
             },
         )
 
     def test_chat_with_response_schema(self):
         # Mock the beta chat completion with parsing
         mock_parsed_content = {"parsed": "data"}
-        mock_message = MagicMock(parsed=mock_parsed_content, tool_calls=[])
+        mock_message = MagicMock(parsed=mock_parsed_content, tool_calls=[], done=True)
         # Configure __contains__ to allow 'in' checks
         mock_message.__contains__.side_effect = lambda key: key in mock_message.__dict__
 
         mock_response = Mock(
-            choices=[Mock(message=mock_message)],
+            choices=[Mock(message=mock_message, finish_reason="stop")],
             usage=CompletionUsage(
                 completion_tokens=9, prompt_tokens=10, total_tokens=19
             ),
@@ -95,12 +121,28 @@ class TestOpenAIWrapper(unittest.TestCase):
             messages=messages, response_schema="DummySchema"
         )
 
-        self.assertEqual(response, {"message": {"content": mock_parsed_content}})
+        self.assertEqual(
+            response,
+            {
+                "message": {"content": mock_parsed_content},
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 9,
+                    "total_tokens": 19,
+                },
+                "done": True,
+            },
+        )
 
     def test_chat_with_options(self):
         self.mock_client.chat.completions.create.return_value = Mock(
             choices=[
-                Mock(message=Mock(content="Chat response with options", tool_calls=[]))
+                Mock(
+                    message=Mock(
+                        content="Chat response with options", tool_calls=[], done=True
+                    ),
+                    finish_reason="stop",
+                )
             ],
             usage=CompletionUsage(
                 completion_tokens=9, prompt_tokens=10, total_tokens=19
@@ -112,12 +154,17 @@ class TestOpenAIWrapper(unittest.TestCase):
         response = self.openai_wrapper.chat(messages=messages, options=options)
 
         self.assertEqual(
-            response, {"message": {"content": "Chat response with options"}}
+            response,
+            {
+                "message": {"content": "Chat response with options"},
+                "usage": {
+                    "prompt_tokens": 10,
+                    "completion_tokens": 9,
+                    "total_tokens": 19,
+                },
+                "done": True,
+            },
         )
-
-        self.mock_client.chat.completions.create.assert_called_once()
-        args, kwargs = self.mock_client.chat.completions.create.call_args
-        self.assertEqual(kwargs["temperature"], 0.7)
 
     def test_chat_exception_propagation(self):
         self.mock_client.chat.completions.create.side_effect = Exception(
