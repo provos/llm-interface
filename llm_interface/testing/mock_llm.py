@@ -55,7 +55,7 @@ class MockLLM(LLMInterface):
         self.responses = responses
         self.disk_cache = NoCache()
 
-    def _uncached_chat(
+    def _cached_chat(
         self,
         messages: List[Dict[str, str]],
         tools: Optional[List] = None,

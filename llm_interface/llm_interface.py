@@ -228,7 +228,7 @@ class LLMInterface:
             + tool_content
         )
 
-    def _uncached_chat(
+    def _cached_chat(
         self,
         messages: List[Dict[str, str]],
         tools: Optional[List[Tool]] = None,
@@ -396,7 +396,7 @@ class LLMInterface:
         # Use provided token_usage or default to self.token_usage
         token_usage = token_usage or self.token_usage
 
-        response = self._uncached_chat(
+        response = self._cached_chat(
             messages=messages,
             tools=tools,
             temperature=temperature,
