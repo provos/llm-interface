@@ -25,6 +25,7 @@ LOGGING = True
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "regression: marks tests as regression tests")
+    config.addinivalue_line("markers", "multimodal: marks tests as multimodal tests")
     config.addinivalue_line(
         "markers",
         "timeout(seconds): mark test to timeout after given number of seconds",
@@ -43,6 +44,13 @@ def pytest_addoption(parser):
         action="store_true",
         default=False,
         help="run regression tests",
+    )
+
+    parser.addoption(
+        "--multi-modal",
+        action="store_true",
+        default=False,
+        help="run multi-modal tests",
     )
 
     parser.addoption(
@@ -79,6 +87,12 @@ def pytest_collection_modifyitems(config, items):
         for item in items:
             if "regression" in item.keywords:
                 item.add_marker(skip_regression)
+
+    if not config.getoption("--multi-modal"):
+        skip_multi_modal = pytest.mark.skip(reason="need --multi-modal option to run")
+        for item in items:
+            if "multimodal" in item.keywords:
+                item.add_marker(skip_multi_modal)
 
     timeout = config.getoption("--test-timeout")
 

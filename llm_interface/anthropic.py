@@ -18,6 +18,8 @@ import requests
 from anthropic import Anthropic, APIError
 from ollama import ListResponse
 
+from .utils import encode_image_to_base64
+
 
 def translate_tools_for_anthropic(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
@@ -65,7 +67,21 @@ def translate_messages_for_anthropic(
     translated_messages = []
 
     for msg in messages:
-        if msg["role"] == "user":
+        if "images" in msg and msg["images"]:
+            content = [{"type": "text", "text": msg["content"]}]
+            for image in msg["images"]:
+                content.append(
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "data": encode_image_to_base64(image),
+                            "media_type": "image/jpeg",
+                        },
+                    }
+                )
+            translated_messages.append({"role": "user", "content": content})
+        elif msg["role"] == "user":
             # Regular user messages pass through unchanged
             translated_messages.append({"role": "user", "content": msg["content"]})
 
@@ -104,6 +120,8 @@ def translate_messages_for_anthropic(
                     ],
                 }
             )
+        elif msg["role"] == "assistant":
+            translated_messages.append(msg)
         else:
             raise ValueError(f"Unknown message role: {msg['role']}")
 
@@ -180,7 +198,9 @@ class AnthropicWrapper:
         filtered_messages = [msg for msg in messages if msg["role"] != "system"]
 
         # Translate messages into Anthropic format
-        if any(msg["role"] == "tool" for msg in filtered_messages):
+        if any(msg["role"] == "tool" for msg in filtered_messages) or any(
+            "images" in msg for msg in filtered_messages
+        ):
             filtered_messages = translate_messages_for_anthropic(filtered_messages)
 
         # Common parameters

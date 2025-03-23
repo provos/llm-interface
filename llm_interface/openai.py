@@ -38,6 +38,57 @@ def translate_tools_for_openai(messages: List[Dict[str, Any]]) -> List[Dict[str,
     return messages
 
 
+def transform_messages_with_images(
+    messages: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """
+    Transform messages to include base64-encoded images in OpenAI's required format.
+
+    Args:
+        messages (List[Dict[str, Any]]): Messages that may contain image paths
+
+    Returns:
+        List[Dict[str, Any]]: Transformed messages compatible with OpenAI's image API
+    """
+    from .utils import encode_image_to_base64
+
+    transformed_messages = []
+
+    for message in messages:
+        new_message = {"role": message["role"]}
+
+        if "images" in message and message["images"]:
+            # Message contains images, transform to OpenAI format
+            content_items = []
+
+            # Add text content if it exists
+            if "content" in message and message["content"]:
+                content_items.append({"type": "text", "text": message["content"]})
+
+            # Add image content
+            for image_path in message["images"]:
+                b64_image = encode_image_to_base64(image_path)
+                # Determine image type from file extension
+                image_type = image_path.split(".")[-1].lower()
+                content_items.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/{image_type};base64,{b64_image}"
+                        },
+                    }
+                )
+
+            new_message["content"] = content_items
+        else:
+            # Regular message without images
+            new_message["content"] = message.get("content", "")
+
+        transformed_messages.append(new_message)
+
+    return transformed_messages
+
+
 def convert_openai_models_to_ollama_response(openai_models_data) -> ListResponse:
     """
     Converts the output of openai.client.list() into ollama's ListResponse format.
@@ -87,7 +138,7 @@ class OpenAIWrapper:
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
-        **kwargs
+        **kwargs,
     ) -> Dict[str, Any]:
         """
         Conduct a chat conversation using the OpenAI API, with optional structured output.
@@ -114,10 +165,19 @@ class OpenAIWrapper:
 
         Raises:
             Exception: Propagates any exceptions raised during the API interaction.
-        """
 
-        # if there are tool_calls, convert them to OpenAI format
-        messages = translate_tools_for_openai(messages)
+        Additional support for image-based messages with the following format:
+        {'role': 'user', 'content': 'text prompt', 'images': ['/path/to/image1.jpg', '/path/to/image2.jpg']}
+        """
+        # Check if any messages contain images
+        has_images = any("images" in message for message in messages)
+
+        if has_images:
+            # Transform messages to include base64-encoded images
+            messages = transform_messages_with_images(messages)
+        else:
+            # Standard message format transformation for tool calls
+            messages = translate_tools_for_openai(messages)
 
         api_params = {
             "model": kwargs.get("model", "gpt-3.5-turbo"),

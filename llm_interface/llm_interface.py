@@ -446,6 +446,7 @@ class LLMInterface:
         extra_validation: Optional[Callable[[BaseModel], Optional[str]]] = None,
         temperature: Optional[float] = None,
         token_usage: Optional[TokenUsage] = None,
+        images: Optional[List[str]] = None,
         **kwargs,
     ) -> Optional[BaseModel]:
         """
@@ -467,6 +468,7 @@ class LLMInterface:
             extra_validation (Optional[Callable[[BaseModel], str]]): An optional function for additional validation of
                 the generated output. It should return an error message if validation fails, otherwise None.
             token_usage (Optional[TokenUsage]): Object to track token usage. If None, uses self.token_usage.
+            images (Optional[List[str]]): List of image paths to encode and send to the model.
             **kwargs: Additional keyword arguments for populating the prompt template.
 
         Returns:
@@ -489,7 +491,10 @@ class LLMInterface:
         messages = []
         if self.support_system_prompt:
             messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": formatted_prompt})
+        message = {"role": "user", "content": formatted_prompt}
+        if images:
+            message["images"] = images
+        messages.append(message)
 
         new_output_schema = output_schema
         if self.requires_thinking:

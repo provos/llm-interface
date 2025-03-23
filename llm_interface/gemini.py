@@ -15,9 +15,11 @@
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from google import genai
+from google.genai import types
 from ollama import ListResponse
 from pydantic import BaseModel
 
@@ -51,6 +53,7 @@ def translate_messages_for_gemini(
 ) -> List[Dict[str, Any]]:
     """
     Translates messages from Ollama format to Gemini format.
+    Handles text, tool calls, and images.
     """
     gemini_messages = []
     for msg in messages:
@@ -84,10 +87,21 @@ def translate_messages_for_gemini(
             }
             gemini_messages.append({"role": "model", "parts": [content]})
         else:
-            # Regular message
-            content = {"text": msg["content"]}
+            parts = []
+            # Add text content if it exists
+            if "content" in msg and msg["content"]:
+                parts.append({"text": msg["content"]})
+            # Check if message contains images
+            if "images" in msg and msg["images"]:
+                # Add each image as a separate part
+                for image_path in msg["images"]:
+                    image = types.Part.from_bytes(
+                        data=Path(image_path).read_bytes(), mime_type="image/jpeg"
+                    )
+                    parts.append(image)
             role = "user" if msg["role"] == "user" else "model"
-            gemini_messages.append({"role": role, "parts": [content]})
+            gemini_messages.append({"role": role, "parts": parts})
+
     return gemini_messages
 
 

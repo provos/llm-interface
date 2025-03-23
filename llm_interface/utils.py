@@ -11,10 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import base64
 import logging
 import os
 from datetime import datetime
 from typing import Optional
+
+
+def encode_image_to_base64(image_path: str) -> str:
+    """
+    Encode an image file to base64 string.
+
+    Args:
+        image_path (str): Path to the image file
+
+    Returns:
+        str: Base64 encoded string of the image
+    """
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode("utf-8")
 
 
 def setup_logging(

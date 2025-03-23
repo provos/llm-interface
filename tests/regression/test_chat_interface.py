@@ -1,7 +1,12 @@
+import os
+
 import pytest
 
 from llm_interface import llm_from_config
 from llm_interface.token_usage import TokenUsage
+
+# Test image path in the assets directory
+IMAGE_PATH = os.path.join(os.path.dirname(__file__), "assets", "boot.jpg")
 
 
 @pytest.fixture(scope="module")
@@ -21,9 +26,6 @@ def llm_client(request):
         log_dir="logs",
         use_cache=False,  # Disable cache for testing to ensure fresh responses
     )
-
-    client.support_json_mode = False
-    client.support_structured_outputs = False
 
     return client
 
@@ -137,6 +139,95 @@ class TestChatInterface:
         llm_client.chat(messages, token_usage=usage_two)
 
         assert usage_two.prompt_tokens > usage_one.prompt_tokens
+
+
+class TestImageSupport:
+    """Tests for image support in the chat interface."""
+
+    @pytest.mark.multimodal
+    def test_chat_with_image(self, llm_client):
+        """Test sending an image along with text in a chat message."""
+
+        messages = [
+            {
+                "role": "user",
+                "content": "What can you see in this image?",
+                "images": [IMAGE_PATH],
+            }
+        ]
+
+        response = llm_client.chat(messages)
+
+        # Verify we got a non-empty response
+        assert isinstance(response, str)
+        assert len(response) > 0
+
+        # Check for keywords that might indicate the model recognized the image
+        # The image is of a German border patrol boat that is docked
+        boat_related_terms = [
+            "boat",
+            "ship",
+            "vessel",
+            "dock",
+            "water",
+            "patrol",
+            "german",
+        ]
+        assert any(
+            term.lower() in response.lower() for term in boat_related_terms
+        ), f"Response doesn't mention any boat-related terms: {response}"
+
+    @pytest.mark.multimodal
+    def test_generate_pydantic_with_image(self, llm_client):
+        """Test generating structured output with an image input."""
+
+        from pydantic import BaseModel
+
+        class ImageDescription(BaseModel):
+            main_subject: str
+            location: str
+            colors: list[str]
+
+        prompt = "Describe the main elements in this image."
+
+        response = llm_client.generate_pydantic(
+            prompt_template=prompt,
+            output_schema=ImageDescription,
+            system="You are a helpful image analyzer. Describe what you see in JSON format.",
+            images=[IMAGE_PATH],
+        )
+
+        # Verify we got a valid structured response
+        assert response is not None
+        assert isinstance(response, ImageDescription)
+        assert len(response.main_subject) > 0
+        assert len(response.location) > 0
+        assert len(response.colors) > 0
+
+        # Check the main subject is boat-related
+        boat_terms = ["boat", "ship", "vessel", "patrol boat"]
+        assert any(
+            term.lower() in response.main_subject.lower() for term in boat_terms
+        ), f"Main subject doesn't mention a boat: {response.main_subject}"
+
+    @pytest.mark.multimodal
+    def test_multiple_images(self, llm_client):
+        """Test sending multiple images in a single request."""
+        messages = [
+            {
+                "role": "user",
+                "content": "Compare these two images.",
+                "images": [IMAGE_PATH, IMAGE_PATH],
+            }
+        ]
+
+        response = llm_client.chat(messages)
+
+        # Check response mentions they're the same or similar
+        similarity_terms = ["same", "identical", "similar"]
+        assert any(
+            term.lower() in response.lower() for term in similarity_terms
+        ), f"Response doesn't mention the images are the same: {response}"
 
 
 if __name__ == "__main__":
