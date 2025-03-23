@@ -19,6 +19,8 @@ from typing import Any, Dict, List, Optional
 import requests
 from ollama import ListResponse
 
+from .utils import encode_image_to_base64
+
 # Base URL for OpenRouter API
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
@@ -43,6 +45,18 @@ def translate_tools_for_openrouter(
                     tool_call["function"]["arguments"] = json.dumps(
                         tool_call["function"]["arguments"]
                     )
+        elif "images" in message and message["images"]:
+            content = [{"type": "text", "text": message.get("content", "")}]
+            images = message.pop("images")
+            for image in images:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": "data:image/jpeg;base64,"
+                        + encode_image_to_base64(image),
+                    }
+                )
+            message["content"] = content
 
     return messages
 
