@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 import requests
 from ollama import ListResponse
 
+from . import errors
 from .utils import encode_image_to_base64
 
 # Base URL for OpenRouter API
@@ -119,6 +120,7 @@ class OpenRouterWrapper:
         max_tokens: int = 4096,
         site_url: str = None,
         site_name: str = None,
+        timeout: float = 600.0,
     ):
         """
         Initialize an OpenRouterWrapper client.
@@ -128,10 +130,12 @@ class OpenRouterWrapper:
             max_tokens (int, optional): Maximum number of tokens for responses. Defaults to 4096.
             site_url (str, optional): Site URL for rankings on openrouter.ai. Defaults to None.
             site_name (str, optional): Site name for rankings on openrouter.ai. Defaults to None.
+            timeout (float, optional): Timeout in seconds for API requests. Defaults to 600.0.
         """
         self.api_key = api_key
         self.max_tokens = max_tokens
         self.session = requests.Session()
+        self.timeout = timeout
 
         # Set up headers
         headers = {
@@ -155,7 +159,9 @@ class OpenRouterWrapper:
             ListResponse: Ollama-compatible response containing model information.
         """
         try:
-            response = self.session.get(f"{OPENROUTER_API_BASE}/models")
+            response = self.session.get(
+                f"{OPENROUTER_API_BASE}/models", timeout=self.timeout
+            )
             response.raise_for_status()
 
             # OpenRouter's models endpoint returns either a "data" array or an array directly
@@ -256,7 +262,9 @@ class OpenRouterWrapper:
         try:
             # Make the API call
             response = self.session.post(
-                f"{OPENROUTER_API_BASE}/chat/completions", json=api_params
+                f"{OPENROUTER_API_BASE}/chat/completions",
+                json=api_params,
+                timeout=self.timeout,
             )
 
             # Log the raw response for debugging
@@ -315,42 +323,34 @@ class OpenRouterWrapper:
                     logging.error("OpenRouter API error: %s", error_detail)
                     return {
                         "error": f"OpenRouter API error: {error_detail}",
+                        "error_type": errors.PROVIDER_SPECIFIC,
                         "message": {"content": ""},
                         "usage": usage_data,
                     }
 
                 return {
-                    "message": {"content": ""},
+                    "message": {"content": None},
                     "error": "No response choices returned from OpenRouter",
+                    "error_type": errors.PROVIDER_SPECIFIC,
                     "usage": usage_data,
                 }
         except requests.exceptions.HTTPError as http_err:
             # Handle HTTP errors (like 4xx, 5xx)
             error_message = f"HTTP error occurred: {http_err}"
             logging.error(error_message)
-            try:
-                error_data = response.json()
-                detailed_message = error_data.get("error", {}).get(
-                    "message", str(http_err)
-                )
-                return {
-                    "error": detailed_message,
-                    "content": None,
-                    "done": False,
-                    "usage": usage_data,
-                }
-            except Exception:
-                return {
-                    "error": error_message,
-                    "content": None,
-                    "done": False,
-                    "usage": usage_data,
-                }
+            return {
+                "error": error_message,
+                "error_type": errors.HTTP,
+                "content": None,
+                "done": False,
+                "usage": usage_data,
+            }
         except requests.exceptions.ConnectionError:
             error_message = "Connection error: Failed to connect to OpenRouter API"
             logging.error(error_message)
             return {
                 "error": error_message,
+                "error_type": errors.CONNECTION,
                 "content": None,
                 "done": False,
                 "usage": usage_data,
@@ -360,6 +360,7 @@ class OpenRouterWrapper:
             logging.error(error_message)
             return {
                 "error": error_message,
+                "error_type": errors.TIMEOUT,
                 "content": None,
                 "done": False,
                 "usage": usage_data,
@@ -369,24 +370,7 @@ class OpenRouterWrapper:
             logging.error(error_message)
             return {
                 "error": error_message,
-                "content": None,
-                "done": False,
-                "usage": usage_data,
-            }
-        except json.JSONDecodeError:
-            error_message = "Failed to parse JSON response from OpenRouter API"
-            logging.error(error_message)
-            return {
-                "error": error_message,
-                "content": None,
-                "done": False,
-                "usage": usage_data,
-            }
-        except Exception as e:
-            error_message = f"Unexpected error: {str(e)}"
-            logging.error(error_message)
-            return {
-                "error": error_message,
+                "error_type": errors.PROVIDER_SPECIFIC,
                 "content": None,
                 "done": False,
                 "usage": usage_data,

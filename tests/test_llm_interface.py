@@ -6,7 +6,8 @@ from unittest.mock import Mock, patch
 from ollama import Client
 from pydantic import BaseModel, Field
 
-from llm_interface import LLMInterface, TokenUsage, tool
+import llm_interface.errors as errors
+from llm_interface import LLMInterface, ModelError, TokenUsage, tool
 from llm_interface.testing.helpers import MockCache
 
 
@@ -1020,6 +1021,118 @@ class TestLLMInterface(unittest.TestCase):
 
         # Verify responses match
         self.assertEqual(response1, response2)
+
+    def test_chat_with_timeout_retry_logic(self):
+        # Create a fresh LLMInterface with specific retry parameters
+        llm = LLMInterface(
+            model_name="test_model",
+            client=self.mock_client,
+            max_retries=2,
+            retry_delay=0.1,  # Short delay for testing
+        )
+        llm.disk_cache = MockCache()
+
+        # Setup mock responses - two timeouts followed by a success
+        self.mock_client.chat.side_effect = [
+            {
+                "error": "The request timed out.",
+                "error_type": errors.TIMEOUT,
+                "content": None,
+                "done": False,
+                "usage": None,
+            },
+            {
+                "error": "The request timed out.",
+                "error_type": errors.TIMEOUT,
+                "content": None,
+                "done": False,
+                "usage": None,
+            },
+            {"message": {"content": "Success after retries"}},
+        ]
+
+        # Call chat method which should trigger retries
+        with patch("llm_interface.llm_interface.time.sleep") as mock_sleep:
+            response = llm.chat(messages=[{"role": "user", "content": "Test message"}])
+
+            # Verify sleep was called for each retry with increasing delay
+            self.assertEqual(mock_sleep.call_count, 2)
+            mock_sleep.assert_any_call(0.1)  # First retry should use base delay
+            mock_sleep.assert_any_call(0.2)  # Second retry should use doubled delay
+
+        # Verify the chat method was called the expected number of times (initial + 2 retries)
+        self.assertEqual(self.mock_client.chat.call_count, 3)
+
+        # Verify we got the successful response after retries
+        self.assertEqual(response, "Success after retries")
+
+    def test_chat_with_connection_error_retry(self):
+        # Create a fresh LLMInterface with specific retry parameters
+        llm = LLMInterface(
+            model_name="test_model",
+            client=self.mock_client,
+            max_retries=1,
+            retry_delay=0.1,  # Short delay for testing
+        )
+        llm.disk_cache = MockCache()
+
+        # Setup mock responses - connection error followed by a success
+        self.mock_client.chat.side_effect = [
+            {
+                "error": "Connection refused",
+                "error_type": errors.CONNECTION,
+                "content": None,
+                "done": False,
+                "usage": None,
+            },
+            {"message": {"content": "Success after connection retry"}},
+        ]
+
+        # Call chat method which should trigger a retry
+        with patch("llm_interface.llm_interface.time.sleep") as mock_sleep:
+            response = llm.chat(messages=[{"role": "user", "content": "Test message"}])
+
+            # Verify sleep was called once
+            mock_sleep.assert_called_once_with(0.1)
+
+        # Verify the chat method was called twice (initial + 1 retry)
+        self.assertEqual(self.mock_client.chat.call_count, 2)
+
+        # Verify we got the successful response after the retry
+        self.assertEqual(response, "Success after connection retry")
+
+    def test_chat_with_exhausted_retries(self):
+        # Create a fresh LLMInterface with specific retry parameters
+        llm = LLMInterface(
+            model_name="test_model",
+            client=self.mock_client,
+            max_retries=2,
+            retry_delay=0.1,  # Short delay for testing
+        )
+        llm.disk_cache = MockCache()
+
+        # Setup mock responses - all timeouts (exceeding max_retries)
+        self.mock_client.chat.return_value = {
+            "error": "The request timed out.",
+            "error_type": errors.TIMEOUT,
+            "content": None,
+            "done": False,
+            "usage": None,
+        }
+
+        # Call chat method which should trigger retries and then fail
+        with patch("llm_interface.llm_interface.time.sleep") as mock_sleep:
+            with self.assertRaises(ModelError) as context:
+                llm.chat(messages=[{"role": "user", "content": "Test message"}])
+
+            # Verify sleep was called for each retry
+            self.assertEqual(mock_sleep.call_count, 2)
+
+        # Verify the chat method was called the expected number of times (initial + max_retries)
+        self.assertEqual(self.mock_client.chat.call_count, 3)
+
+        # Verify the error message contains timeout information
+        self.assertIn("Generic error: The request timed out.", str(context.exception))
 
 
 if __name__ == "__main__":

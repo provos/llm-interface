@@ -1,0 +1,6 @@
+TIMEOUT = "timeout"
+LENGTH = "length"
+CONTENT_FILTER = "content_filter"
+PROVIDER_SPECIFIC = "provider_specific"
+HTTP = "http"
+CONNECTION = "connection"

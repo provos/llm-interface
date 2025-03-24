@@ -17,7 +17,14 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ollama import ListResponse
-from openai import ContentFilterFinishReasonError, LengthFinishReasonError, OpenAI
+from openai import (
+    APITimeoutError,
+    ContentFilterFinishReasonError,
+    LengthFinishReasonError,
+    OpenAI,
+)
+
+from . import errors
 
 
 def translate_tools_for_openai(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -127,8 +134,8 @@ def convert_openai_models_to_ollama_response(openai_models_data) -> ListResponse
 
 
 class OpenAIWrapper:
-    def __init__(self, api_key: str, max_tokens: int = 4096):
-        self.client = OpenAI(api_key=api_key)
+    def __init__(self, api_key: str, max_tokens: int = 4096, timeout: float = 600.0):
+        self.client = OpenAI(api_key=api_key, timeout=timeout)
         self.max_tokens = max_tokens
 
     def list(self) -> ListResponse:
@@ -263,25 +270,28 @@ class OpenAIWrapper:
             # Handle the length error
             return {
                 "error": "Response exceeded the maximum allowed length.",
+                "error_type": errors.LENGTH,
                 "content": None,
                 "done": False,
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },  # Include empty usage data
+                "usage": None,
             }
         except ContentFilterFinishReasonError:
             # Handle the content filter error
             return {
                 "error": "Content was rejected by the content filter.",
+                "error_type": errors.CONTENT_FILTER,
                 "content": None,
                 "done": False,
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },  # Include empty usage data
+                "usage": None,
+            }
+        except APITimeoutError:
+            # Handle the timeout error
+            return {
+                "error": "The request timed out.",
+                "error_type": errors.TIMEOUT,
+                "content": None,
+                "done": False,
+                "usage": None,
             }
         except Exception as e:
             raise e

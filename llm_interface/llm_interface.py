@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
 import diskcache
@@ -22,7 +23,9 @@ from dotenv import load_dotenv
 from ollama import Client, ListResponse
 from pydantic import BaseModel, Field, create_model
 
+from . import errors
 from .llm_tool import Tool
+from .ollama import OllamaWrapper
 from .pydantic_output_parser import MinimalPydanticOutputParser
 from .token_usage import TokenUsage
 from .utils import setup_logging
@@ -62,6 +65,9 @@ class LLMInterface:
         requires_thinking (bool): Whether the model requires a 'thinking' field in the output to work.
         disk_cache: Cache instance for storing and retrieving model responses.
         token_usage: TokenUsage instance for tracking token usage across requests.
+        timeout (float): Timeout in seconds for API requests.
+        max_retries (int): Maximum number of retries for API requests.
+        retry_delay (float): Delay in seconds between retries for API requests.
 
     Example:
         >>> llm = LLMInterface(
@@ -99,13 +105,18 @@ class LLMInterface:
         support_system_prompt: bool = True,
         requires_thinking: bool = False,
         use_cache: bool = True,
+        timeout: float = 600.0,
+        max_retries: int = 3,
+        retry_delay: float = 2.0,
     ):
         self.model_name = model_name
-        self.client = client if client else Client(host=host)
+        self.client = client if client else OllamaWrapper(host=host, timeout=timeout)
         self.support_json_mode = support_json_mode
         self.support_structured_outputs = support_structured_outputs
         self.support_system_prompt = support_system_prompt
         self.requires_thinking = requires_thinking
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
 
         self.logger = setup_logging(
             logs_dir=log_dir, logs_prefix="llm_interface", logger_name=__name__
@@ -264,7 +275,16 @@ class LLMInterface:
         token_usage = token_usage or self.token_usage
 
         # Concatenate all messages to use as the cache key
-        message_content = "".join([msg["role"] + msg["content"] for msg in messages])
+        message_content = "".join(
+            [
+                (
+                    msg["role"]
+                    + msg["content"]
+                    + (str(msg["images"]) if "images" in msg else "")
+                )
+                for msg in messages
+            ]
+        )
         tool_content = ""
         if tools:
             tool_content = "".join([f"{t.name}{t.description}" for t in tools])
@@ -308,17 +328,48 @@ class LLMInterface:
 
                 converted_tools = [tool.to_dict() for tool in tools] if tools else []
 
-                # Make request to client using chat interface
-                response = self.client.chat(
-                    model=self.model_name,
-                    tools=converted_tools,
-                    messages=current_messages,
-                    **kwargs,
-                )
+                # Make request to client using chat interface with retry for timeouts
+                retry_count = 0
+                while retry_count <= self.max_retries:
+                    response = self.client.chat(
+                        model=self.model_name,
+                        tools=converted_tools,
+                        messages=current_messages,
+                        **kwargs,
+                    )
 
-                self.logger.info("Received chat response: %s", response)
+                    self.logger.info("Received chat response: %s", response)
 
-                # If using Ollama which doesn't provide token counts, estimate them
+                    # Check for timeout error
+                    if (
+                        "error" in response
+                        and "error_type" in response
+                        and (
+                            response.get("error_type") == errors.TIMEOUT
+                            or response.get("error_type") == errors.CONNECTION
+                        )
+                    ):
+                        retry_count += 1
+                        if retry_count <= self.max_retries:
+                            self.logger.warning(
+                                "Request error (%s). Retrying (%d/%d) after %.1f seconds...",
+                                response["error"],
+                                retry_count,
+                                self.max_retries,
+                                self.retry_delay * retry_count,
+                            )
+                            time.sleep(self.retry_delay * retry_count)
+                            continue
+                        else:
+                            self.logger.error(
+                                "Request failed out after %d retries.", self.max_retries
+                            )
+                            break
+                    else:
+                        # Not a timeout error, proceed normally
+                        break
+
+                # Special handling for Ollama client
                 if isinstance(self.client, Client):
                     token_usage.update(
                         prompt_tokens=response.get("prompt_eval_count", 0),

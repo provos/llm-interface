@@ -11,13 +11,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 import requests
-from anthropic import Anthropic, APIError
+from anthropic import Anthropic, APIConnectionError, APIError, APITimeoutError
 from ollama import ListResponse
 
+from . import errors
 from .utils import encode_image_to_base64
 
 
@@ -168,8 +170,8 @@ def convert_anthropic_models_to_ollama_response(
 
 
 class AnthropicWrapper:
-    def __init__(self, api_key: str, max_tokens: int = 4096):
-        self.client = Anthropic(api_key=api_key)
+    def __init__(self, api_key: str, max_tokens: int = 4096, timeout: float = 600.0):
+        self.client = Anthropic(api_key=api_key, timeout=timeout)
         self.api_key = api_key
         self.max_tokens = max_tokens
 
@@ -271,8 +273,36 @@ class AnthropicWrapper:
                 "done": response.stop_reason == "end_turn",
             }
 
+        except APITimeoutError as e:
+            error_message = f"Anthropic API timeout: {str(e)}"
+            logging.error(error_message)
+            return {
+                "error": error_message,
+                "error_type": errors.TIMEOUT,
+                "content": None,
+                "done": False,
+                "usage": None,
+            }
+        except APIConnectionError as e:
+            error_message = f"Anthropic API connection error: {str(e)}"
+            logging.error(error_message)
+            return {
+                "error": error_message,
+                "error_type": errors.CONNECTION,
+                "content": None,
+                "done": False,
+                "usage": None,
+            }
         except APIError as e:
-            raise e
+            error_message = f"Anthropic API error: {str(e)}"
+            logging.error(error_message)
+            return {
+                "error": error_message,
+                "error_type": errors.PROVIDER_SPECIFIC,
+                "content": None,
+                "done": False,
+                "usage": None,
+            }
 
     def list(self) -> ListResponse:
         """

@@ -80,6 +80,7 @@ def llm_from_config(
     username: Optional[str] = None,
     log_dir: str = "logs",
     use_cache: bool = True,
+    timeout: float = 600.0,
 ) -> LLMInterface:
     """
     Creates and configures a language model interface based on specified provider and parameters.
@@ -97,6 +98,7 @@ def llm_from_config(
         username (Optional[str]): Username for SSH connection. Required for "remote_ollama".
         log_dir (str): Directory for storing logs. Defaults to "logs".
         use_cache (bool): Whether to cache model responses. Defaults to True.
+        timeout (float): Timeout in seconds for model requests. Defaults to 600.0.
 
     Returns:
         LLMInterface: Configured interface for interacting with the specified LLM.
@@ -124,7 +126,9 @@ def llm_from_config(
             api_key = os.getenv("OPENAI_API_KEY")
             if api_key is None:
                 raise ValueError("OPENAI_API_KEY not found in environment variables")
-            wrapper = OpenAIWrapper(api_key=api_key, max_tokens=max_tokens)
+            wrapper = OpenAIWrapper(
+                api_key=api_key, max_tokens=max_tokens, timeout=timeout
+            )
 
             support_structured_outputs = supports_structured_output(model_name)
             support_json_mode = model_name not in ["o1-mini", "o1-preview"]
@@ -138,6 +142,7 @@ def llm_from_config(
                 support_structured_outputs=support_structured_outputs,
                 support_system_prompt=support_system_prompt,
                 use_cache=use_cache,
+                timeout=timeout,
             )
         case "anthropic":
             api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -150,6 +155,7 @@ def llm_from_config(
                 client=wrapper,
                 support_json_mode=False,
                 use_cache=use_cache,
+                timeout=timeout,
             )
         case "gemini":
             api_key = os.getenv("GEMINI_API_KEY")
@@ -164,6 +170,7 @@ def llm_from_config(
                 support_structured_outputs=True,  # Gemini supports structured outputs
                 support_system_prompt=True,
                 use_cache=use_cache,
+                timeout=timeout,
             )
         case "openrouter":
             api_key = os.getenv("OPENROUTER_API_KEY")
@@ -191,6 +198,7 @@ def llm_from_config(
                 support_structured_outputs=True,
                 support_system_prompt=True,
                 use_cache=use_cache,
+                timeout=timeout,
             )
         case "ollama" | "remote_ollama":
             # Enable structured outputs for Llama 3+ models
@@ -213,6 +221,7 @@ def llm_from_config(
                 support_structured_outputs=supports_structured,
                 requires_thinking=requires_thinking,
                 use_cache=use_cache,
+                timeout=timeout,
             )
 
     raise ValueError(f"Invalid LLM provider in config: {provider}")

@@ -6,6 +6,7 @@ from openai import ContentFilterFinishReasonError, LengthFinishReasonError
 from openai.pagination import SyncPage
 from openai.types import CompletionUsage, Model
 
+import llm_interface.errors as errors
 from llm_interface.openai import OpenAIWrapper
 
 
@@ -69,13 +70,10 @@ class TestOpenAIWrapper(unittest.TestCase):
             response,
             {
                 "error": "Response exceeded the maximum allowed length.",
+                "error_type": errors.LENGTH,
                 "content": None,
                 "done": False,
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
+                "usage": None,
             },
         )
 
@@ -91,13 +89,10 @@ class TestOpenAIWrapper(unittest.TestCase):
             response,
             {
                 "error": "Content was rejected by the content filter.",
+                "error_type": errors.CONTENT_FILTER,
                 "content": None,
                 "done": False,
-                "usage": {
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "total_tokens": 0,
-                },
+                "usage": None,
             },
         )
 
