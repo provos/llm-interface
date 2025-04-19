@@ -142,7 +142,7 @@ class GeminiWrapper:
 
     def list(self) -> ListResponse:
         """List available models in Ollama format."""
-        models = self.client.list_models()
+        models = self.client.models.list()
         return convert_gemini_models_to_ollama_response(models)
 
     def chat(
