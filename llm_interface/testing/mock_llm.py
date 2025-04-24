@@ -62,6 +62,7 @@ class MockLLM(LLMInterface):
         temperature: Optional[float] = None,
         response_schema: Optional[Type[BaseModel]] = None,
         token_usage: Optional[TokenUsage] = None,
+        **kwargs,  # Add kwargs to accept extra arguments
     ) -> str:
         # Reconstruct the full prompt from messages
         full_prompt = ""
@@ -83,12 +84,18 @@ class MockLLM(LLMInterface):
                     return mock_response.response_string
 
                 if mock_response.response is None:
+                    # Return None directly if the mock response is None
+                    # The caller (e.g., generate_pydantic) handles JSON conversion if needed
                     return None
 
-                if self.support_structured_outputs:
+                if self.support_structured_outputs and response_schema:
+                    # If structured outputs are supported and a schema is provided,
+                    # return a copy of the Pydantic object.
                     return mock_response.response.model_copy()
                 else:
-                    # Convert Pydantic object to JSON string
+                    # Otherwise, return the JSON string representation.
+                    # This handles cases where structured outputs are not supported,
+                    # or when chat() is called directly without a response_schema.
                     return mock_response.response.model_dump_json()
 
         raise ValueError(f"No matching mock response found for prompt: {full_prompt}")
