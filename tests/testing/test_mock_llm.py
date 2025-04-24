@@ -154,6 +154,29 @@ class TestMockLLM(unittest.TestCase):
         self.assertIsInstance(result, str)
         self.assertEqual(result, "This is a raw string response")
 
+    def test_chat_with_pydantic(self):
+        """Test chat functionality with Pydantic response."""
+        result = self.mock_llm.chat(
+            messages=[{"role": "user", "content": "Get person named Alice"}],
+            response_schema=Person,
+        )
+
+        self.assertIsInstance(result, Person)
+        self.assertEqual(result.name, "Alice")
+
+    def test_chat_with_pydantic_no_json(self):
+        """Test chat functionality with Pydantic response."""
+        result = self.mock_llm.chat(
+            messages=[{"role": "user", "content": "Get person named Alice"}],
+            response_schema=Person,
+            allow_json_mode=False,
+        )
+
+        self.assertIsInstance(result, str)
+        result = Person.model_validate_json(result)
+        self.assertIsInstance(result, Person)
+        self.assertEqual(result.name, "Alice")
+
 
 if __name__ == "__main__":
     unittest.main()

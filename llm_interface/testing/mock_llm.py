@@ -62,7 +62,7 @@ class MockLLM(LLMInterface):
         temperature: Optional[float] = None,
         response_schema: Optional[Type[BaseModel]] = None,
         token_usage: Optional[TokenUsage] = None,
-        **kwargs,  # Add kwargs to accept extra arguments
+        allow_json_mode: bool = True,
     ) -> str:
         # Reconstruct the full prompt from messages
         full_prompt = ""
@@ -88,7 +88,11 @@ class MockLLM(LLMInterface):
                     # The caller (e.g., generate_pydantic) handles JSON conversion if needed
                     return None
 
-                if self.support_structured_outputs and response_schema:
+                if (
+                    self.support_structured_outputs
+                    and response_schema
+                    and allow_json_mode
+                ):
                     # If structured outputs are supported and a schema is provided,
                     # return a copy of the Pydantic object.
                     return mock_response.response.model_copy()
