@@ -246,6 +246,7 @@ class LLMInterface:
         temperature: Optional[float] = None,
         response_schema: Optional[Type[BaseModel]] = None,
         token_usage: Optional[TokenUsage] = None,
+        allow_json_mode: bool = True,
     ) -> str:
         """Execute a chat conversation with caching and optional tool execution.
 
@@ -259,6 +260,7 @@ class LLMInterface:
             temperature (Optional[float], optional): Sampling temperature for response generation. Defaults to None.
             response_schema (Optional[Type[BaseModel]], optional): Pydantic model for structured output. Defaults to None.
             token_usage (Optional[TokenUsage]): Object to track token usage. If None, uses self.token_usage.
+            allow_json_mode (bool): Whether to allow JSON mode for the response. Defaults to True.
 
         Returns:
             str: The content of the chat response message
@@ -305,15 +307,16 @@ class LLMInterface:
             current_messages = messages.copy()
 
             # some models can generate structured outputs
-            if self.support_structured_outputs and response_schema:
-                if isinstance(self.client, Client):
-                    # For Ollama, we need to pass the schema directly
-                    kwargs["format"] = response_schema.model_json_schema()
-                else:
-                    # For OpenAI, we need to pass the schema as a pydantic object
-                    kwargs["response_schema"] = response_schema
-            elif self.support_json_mode:
-                kwargs["format"] = "json"
+            if allow_json_mode:
+                if self.support_structured_outputs and response_schema:
+                    if isinstance(self.client, Client):
+                        # For Ollama, we need to pass the schema directly
+                        kwargs["format"] = response_schema.model_json_schema()
+                    else:
+                        # For OpenAI, we need to pass the schema as a pydantic object
+                        kwargs["response_schema"] = response_schema
+                elif self.support_json_mode:
+                    kwargs["format"] = "json"
 
             # ollama expects temperature to be passed as an option
             options = {}
@@ -421,6 +424,7 @@ class LLMInterface:
         temperature: Optional[float] = None,
         response_schema: Optional[Type[BaseModel]] = None,
         token_usage: Optional[TokenUsage] = None,
+        allow_json_mode: bool = True,
     ) -> str:
         """
         Sends a chat request to the LLM and returns the response.
@@ -436,6 +440,7 @@ class LLMInterface:
             response_schema (Optional[Type[BaseModel]], optional): Pydantic model defining the expected response structure.
                 If provided, the response will be parsed according to this schema. Defaults to None.
             token_usage (Optional[TokenUsage]): Object to track token usage. If None, uses self.token_usage.
+            allow_json_mode (bool): Whether to allow JSON mode for the response. Defaults to True. Set False for a straight chat experience.
 
         Returns:
             str: The LLM's response text, stripped of leading/trailing whitespace if string,
@@ -453,6 +458,7 @@ class LLMInterface:
             temperature=temperature,
             response_schema=response_schema,
             token_usage=token_usage,
+            allow_json_mode=allow_json_mode,
         )
         self.logger.info(
             "Received chat response: %s...",

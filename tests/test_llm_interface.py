@@ -1134,6 +1134,78 @@ class TestLLMInterface(unittest.TestCase):
         # Verify the error message contains timeout information
         self.assertIn("Generic error: The request timed out.", str(context.exception))
 
+    def test_chat_allow_json_mode(self):
+        # Test when allow_json_mode is True (default)
+        self.llm_interface.support_json_mode = True
+        self.mock_client.chat.return_value = {
+            "message": {"content": '{"key": "value"}'}
+        }
+
+        self.llm_interface.chat(
+            messages=[{"role": "user", "content": "Get JSON"}],
+            allow_json_mode=True,
+        )
+
+        # Verify format="json" was passed
+        call_args = self.mock_client.chat.call_args[1]
+        self.assertEqual(call_args.get("format"), "json")
+
+        # Reset mock for next call
+        self.mock_client.chat.reset_mock()
+
+        # Test when allow_json_mode is False
+        self.llm_interface.chat(
+            messages=[{"role": "user", "content": "Get text"}],
+            allow_json_mode=False,
+        )
+
+        # Verify format="json" was NOT passed
+        call_args = self.mock_client.chat.call_args[1]
+        self.assertNotIn("format", call_args)
+
+        # Reset mock for next call
+        self.mock_client.chat.reset_mock()
+
+        # Test when response_schema is provided (should ignore allow_json_mode)
+        class JsonSchema(BaseModel):
+            key: str
+
+        self.llm_interface.support_structured_outputs = True
+        self.llm_interface.client = Mock()  # Use a non-Ollama mock
+        self.llm_interface.client.chat.return_value = {
+            "message": {"content": JsonSchema(key="value")}
+        }
+        self.llm_interface.generate_pydantic(
+            prompt_template="Get structured JSON",
+            output_schema=JsonSchema,
+            allow_json_mode=False,  # This should be ignored
+        )
+
+        # Verify response_schema was passed, not format="json"
+        call_args = self.llm_interface.client.chat.call_args[1]
+        self.assertNotIn("format", call_args)
+        self.assertEqual(call_args.get("response_schema"), JsonSchema)
+
+        # Reset mock and settings for next call
+        self.mock_client.chat.reset_mock()
+        self.llm_interface.support_structured_outputs = False
+        self.llm_interface.client = self.mock_client  # Restore original mock
+
+        # Clear cache before the next call to ensure mock is called
+        self.llm_interface.disk_cache = MockCache()
+
+        # Test when support_json_mode is False
+        self.llm_interface.support_json_mode = False
+        self.llm_interface.chat(
+            messages=[{"role": "user", "content": "Get text"}],
+            allow_json_mode=True,  # This should be ignored
+        )
+
+        # Verify format="json" was NOT passed
+        self.mock_client.chat.assert_called_once()  # Ensure the mock was called
+        call_args = self.mock_client.chat.call_args[1]
+        self.assertNotIn("format", call_args)
+
 
 if __name__ == "__main__":
     unittest.main()
