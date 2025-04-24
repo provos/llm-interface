@@ -5,7 +5,7 @@ from .llm_interface import LLMInterface, ModelError
 from .llm_tool import tool
 from .token_usage import TokenUsage
 
-__version__ = "0.1.9"
+__version__ = "0.1.10"
 __all__ = [
     "LLMInterface",
     "llm_from_config",
