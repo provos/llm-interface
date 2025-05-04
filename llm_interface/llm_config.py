@@ -81,6 +81,8 @@ def llm_from_config(
     log_dir: str = "logs",
     use_cache: bool = True,
     timeout: float = 600.0,
+    json_mode: Optional[bool] = None,
+    structured_outputs: Optional[bool] = None,
 ) -> LLMInterface:
     """
     Creates and configures a language model interface based on specified provider and parameters.
@@ -99,6 +101,8 @@ def llm_from_config(
         log_dir (str): Directory for storing logs. Defaults to "logs".
         use_cache (bool): Whether to cache model responses. Defaults to True.
         timeout (float): Timeout in seconds for model requests. Defaults to 600.0.
+        json_mode (Optional[bool]): Whether to override JSON mode support. Defaults to None.
+        structured_outputs (Optional[bool]): Whether to override structured output support. Defaults to None.
 
     Returns:
         LLMInterface: Configured interface for interacting with the specified LLM.
@@ -121,6 +125,8 @@ def llm_from_config(
         ...     username="user"
         ... )
     """
+    llm: LLMInterface
+
     match provider:
         case "openai":
             api_key = os.getenv("OPENAI_API_KEY")
@@ -134,7 +140,7 @@ def llm_from_config(
             support_json_mode = model_name not in ["o1-mini", "o1-preview"]
             support_system_prompt = model_name not in ["o1-mini", "o1-preview"]
 
-            return LLMInterface(
+            llm = LLMInterface(
                 model_name=model_name,
                 log_dir=log_dir,
                 client=wrapper,
@@ -149,7 +155,7 @@ def llm_from_config(
             if api_key is None:
                 raise ValueError("ANTHROPIC_API_KEY not found in environment variables")
             wrapper = AnthropicWrapper(api_key=api_key, max_tokens=max_tokens)
-            return LLMInterface(
+            llm = LLMInterface(
                 model_name=model_name,
                 log_dir=log_dir,
                 client=wrapper,
@@ -162,7 +168,7 @@ def llm_from_config(
             if api_key is None:
                 raise ValueError("GEMINI_API_KEY not found in environment variables")
             wrapper = GeminiWrapper(api_key=api_key, max_tokens=max_tokens)
-            return LLMInterface(
+            llm = LLMInterface(
                 model_name=model_name,
                 log_dir=log_dir,
                 client=wrapper,
@@ -190,7 +196,7 @@ def llm_from_config(
                 site_name=site_name,
             )
 
-            return LLMInterface(
+            llm = LLMInterface(
                 model_name=model_name,
                 log_dir=log_dir,
                 client=wrapper,
@@ -212,7 +218,7 @@ def llm_from_config(
             else:
                 client = None
             requires_thinking = model_name.lower().startswith("deepseek-r")
-            return LLMInterface(
+            llm = LLMInterface(
                 model_name=model_name,
                 log_dir=log_dir,
                 client=client,
@@ -223,5 +229,13 @@ def llm_from_config(
                 use_cache=use_cache,
                 timeout=timeout,
             )
+        case _:
+            raise ValueError(f"Invalid LLM provider in config: {provider}")
 
-    raise ValueError(f"Invalid LLM provider in config: {provider}")
+    # Override JSON mode and structured output support if specified
+    if json_mode is not None:
+        llm.support_json_mode = json_mode
+    if structured_outputs is not None:
+        llm.support_structured_outputs = structured_outputs
+
+    return llm
