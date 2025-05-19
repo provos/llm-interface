@@ -2,7 +2,7 @@ import inspect
 import re
 from dataclasses import dataclass, field
 from textwrap import dedent
-from typing import Any, Callable, Dict, Optional, Type, get_type_hints
+from typing import Any, Callable, Dict, List, Optional, get_type_hints
 
 
 @dataclass
@@ -24,11 +24,11 @@ class Tool:
             },
         }
 
-    def execute(self, **kwargs) -> Any:
+    def execute(self, **kwargs: Dict[str, Any]) -> Any:
         return self.func(**kwargs)
 
 
-def _type_to_json_schema(type_hint: Type) -> Dict[str, Any]:
+def _type_to_json_schema(type_hint: Any) -> Dict[str, Any]:
     """Convert Python type hints to JSON Schema types."""
     if type_hint == str:
         return {"type": "string"}
@@ -53,13 +53,19 @@ def _type_to_json_schema(type_hint: Type) -> Dict[str, Any]:
 
 def _parse_docstring(docstring: str) -> tuple[str, dict[str, str]]:
     """
-    Parse a docstring to extract the main description and parameter descriptions.
+    Parse a function's docstring into a main summary and detailed parameter docs.
+
+    The docstring is split on the first blank line to extract the first paragraph as the
+    main description. The 'Args:' section is then scanned (case-insensitive) to collect
+    each parameter's description, handling continuation lines.
 
     Args:
-        docstring: The function's docstring
+        docstring (str): The full raw docstring of the function.
 
     Returns:
-        tuple: (main_description, parameter_descriptions)
+        tuple[str, dict[str, str]]: A pair where the first element is the main description
+            (the first paragraph, dedented), and the second is a dictionary mapping each
+            parameter name to its description from the Args section.
     """
     if not docstring:
         return "", {}
@@ -71,14 +77,14 @@ def _parse_docstring(docstring: str) -> tuple[str, dict[str, str]]:
     main_desc = parts[0].strip()
 
     # Parse parameter descriptions
-    param_desc = {}
+    param_desc: Dict[str, str] = {}
     current_param = None
     in_args_section = False
 
     # Join all parts after the main description
     remaining_text = "\n".join(parts[1:]) if len(parts) > 1 else ""
 
-    args_lines = []
+    args_lines: List[str] = []
     for line in remaining_text.split("\n"):
         line = line.rstrip()
 
@@ -103,7 +109,6 @@ def _parse_docstring(docstring: str) -> tuple[str, dict[str, str]]:
         if line and not line.startswith(" "):
             # Look for parameter definition (param: description)
             param_match = re.match(r"(\w+):\s*(.*)", line)
-            print(param_match)
             if param_match:
                 current_param = param_match.group(1)
                 param_desc[current_param] = param_match.group(2)
@@ -158,7 +163,7 @@ def create_tool(
     signature = inspect.signature(func)
 
     # Build parameters schema
-    parameters = {
+    parameters: Dict[str, Any] = {
         "type": "object",
         "properties": {},
         "required": [],
@@ -186,7 +191,9 @@ def create_tool(
     return Tool(name=func_name, description=func_desc, parameters=parameters, func=func)
 
 
-def tool(name: Optional[str] = None, description: Optional[str] = None) -> Callable:
+def tool(
+    name: Optional[str] = None, description: Optional[str] = None
+) -> Callable[[Callable[..., Any]], Tool]:
     """
     Decorator to create a Tool from a function.
 
@@ -205,7 +212,7 @@ def tool(name: Optional[str] = None, description: Optional[str] = None) -> Calla
             pass
     """
 
-    def decorator(func: Callable) -> Tool:
+    def decorator(func: Callable[..., Any]) -> Tool:
         return create_tool(func, name=name, description=description)
 
     return decorator
