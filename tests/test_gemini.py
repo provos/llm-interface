@@ -224,6 +224,43 @@ class TestGeminiWrapper(unittest.TestCase):
         ):
             self.gemini_wrapper = GeminiWrapper(api_key=self.api_key)
 
+    @patch("llm_interface.gemini.genai.Client")
+    @patch("llm_interface.gemini.types.HttpOptions")
+    def test_timeout_conversion_seconds_to_milliseconds(
+        self, mock_http_options, mock_genai_client
+    ):
+        """Test that timeout is correctly converted from seconds to milliseconds."""
+        mock_http_options_instance = MagicMock()
+        mock_http_options.return_value = mock_http_options_instance
+        mock_client_instance = MagicMock()
+        mock_genai_client.return_value = mock_client_instance
+
+        # Test with default timeout (600.0 seconds)
+        GeminiWrapper(api_key="test_key")
+
+        # Verify HttpOptions was called with timeout in milliseconds
+        mock_http_options.assert_called_once_with(timeout=600000)  # 600.0 * 1000
+
+        # Verify genai.Client was called with the HttpOptions
+        mock_genai_client.assert_called_once_with(
+            api_key="test_key", http_options=mock_http_options_instance
+        )
+
+        # Reset mocks for second test
+        mock_http_options.reset_mock()
+        mock_genai_client.reset_mock()
+
+        # Test with custom timeout (30.5 seconds)
+        GeminiWrapper(api_key="test_key", timeout=30.5)
+
+        # Verify HttpOptions was called with timeout in milliseconds
+        mock_http_options.assert_called_with(timeout=30500)  # 30.5 * 1000
+
+        # Verify genai.Client was called with the HttpOptions
+        mock_genai_client.assert_called_with(
+            api_key="test_key", http_options=mock_http_options.return_value
+        )
+
     @patch("llm_interface.gemini.convert_gemini_models_to_ollama_response")
     def test_list(self, mock_convert):
         mock_models_list = [MockGenaiModel(name="model1")]
