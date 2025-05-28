@@ -167,7 +167,9 @@ def llm_from_config(
             api_key = os.getenv("GEMINI_API_KEY")
             if api_key is None:
                 raise ValueError("GEMINI_API_KEY not found in environment variables")
-            wrapper = GeminiWrapper(api_key=api_key, max_tokens=max_tokens)
+            wrapper = GeminiWrapper(
+                api_key=api_key, max_tokens=max_tokens, timeout=timeout
+            )
             llm = LLMInterface(
                 model_name=model_name,
                 log_dir=log_dir,

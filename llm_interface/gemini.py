@@ -136,7 +136,10 @@ def convert_gemini_models_to_ollama_response(models_data) -> ListResponse:
 class GeminiWrapper:
     def __init__(self, api_key: str, max_tokens: int = 4096, timeout: float = 600.0):
         self.client = genai.Client(
-            api_key=api_key, http_options=types.HttpOptions(timeout=timeout)
+            api_key=api_key,
+            http_options=types.HttpOptions(
+                timeout=int(timeout * 1000)
+            ),  # timeout is in ms
         )
         self.max_tokens = max_tokens
 
