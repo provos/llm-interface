@@ -135,13 +135,73 @@ def convert_gemini_models_to_ollama_response(models_data) -> ListResponse:
 
 class GeminiWrapper:
     def __init__(self, api_key: str, max_tokens: int = 4096, timeout: float = 600.0):
+        # Dynamically detect whether HttpOptions expects timeout in milliseconds (int) or seconds (float)
+        timeout_value = self._get_appropriate_timeout_value(timeout)
+
         self.client = genai.Client(
             api_key=api_key,
-            http_options=types.HttpOptions(
-                timeout=int(timeout * 1000)
-            ),  # timeout is in ms
+            http_options=types.HttpOptions(timeout=timeout_value),
         )
         self.max_tokens = max_tokens
+
+    def _get_appropriate_timeout_value(self, timeout_seconds: float) -> int | float:
+        """
+        Determine the appropriate timeout value for HttpOptions.
+
+        This method inspects the HttpOptions timeout field to determine if it expects
+        milliseconds (int) or seconds (float), making the implementation future-proof
+        against API changes.
+
+        Args:
+            timeout_seconds: Timeout value in seconds
+
+        Returns:
+            Timeout value in the format expected by HttpOptions (int for ms, float for seconds)
+        """
+        try:
+            # Get the HttpOptions model fields (it's a Pydantic model)
+            model_fields = types.HttpOptions.model_fields
+            timeout_field = model_fields.get("timeout")
+
+            if timeout_field is None:
+                # Fallback: if no timeout field found, assume milliseconds (current behavior)
+                return int(timeout_seconds * 1000)
+
+            # Check the type annotation
+            timeout_annotation = timeout_field.annotation
+
+            # Extract the actual types from the annotation
+            if hasattr(timeout_annotation, "__args__"):
+                # Handle Union/Optional types (e.g., Optional[int] = Union[int, None])
+                actual_types = list(timeout_annotation.__args__)
+            else:
+                # Handle simple types
+                actual_types = [timeout_annotation]
+
+            # Remove None type for Optional handling
+            non_none_types = [t for t in actual_types if t is not type(None)]
+
+            if not non_none_types:
+                # Fallback: if no concrete types found, assume milliseconds
+                return int(timeout_seconds * 1000)
+
+            # Check what types are expected
+            has_int = int in non_none_types
+            has_float = float in non_none_types
+
+            if has_float and not has_int:
+                # API expects float (likely seconds)
+                return timeout_seconds
+            elif has_int and not has_float:
+                # API expects int (likely milliseconds) - current behavior
+                return int(timeout_seconds * 1000)
+            else:
+                # fallback to current behavior (milliseconds)
+                return int(timeout_seconds * 1000)
+
+        except Exception:
+            # If any error occurs during inspection, fallback to current behavior
+            return int(timeout_seconds * 1000)
 
     def list(self) -> ListResponse:
         """List available models in Ollama format."""

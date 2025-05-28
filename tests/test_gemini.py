@@ -261,6 +261,108 @@ class TestGeminiWrapper(unittest.TestCase):
             api_key="test_key", http_options=mock_http_options.return_value
         )
 
+    def test_http_options_timeout_type_assumption(self):
+        """
+        Test that validates our assumption about HttpOptions timeout parameter type.
+
+        This test checks if HttpOptions expects timeout in milliseconds (int) or seconds (float).
+        If the Gemini API changes to expect seconds instead of milliseconds, this test will
+        help us detect that change and update our conversion logic accordingly.
+        """
+        from google.genai import types
+
+        # Get the HttpOptions model fields (it's a Pydantic model)
+        model_fields = types.HttpOptions.model_fields
+        timeout_field = model_fields.get("timeout")
+
+        # Verify that timeout field exists
+        self.assertIsNotNone(timeout_field, "HttpOptions should have a timeout field")
+
+        # Check the type annotation
+        timeout_annotation = timeout_field.annotation
+
+        # Current expectation: timeout should be Optional[int] (milliseconds)
+        # If this changes to Optional[float], it likely means they switched to seconds
+
+        # Extract the actual types from the annotation
+        if hasattr(timeout_annotation, "__args__"):
+            # Handle Union/Optional types (e.g., Optional[int] = Union[int, None])
+            actual_types = list(timeout_annotation.__args__)
+        else:
+            # Handle simple types
+            actual_types = [timeout_annotation]
+
+        # Check if our current assumption (int for milliseconds) is still valid
+        has_int = int in actual_types
+        has_float = float in actual_types
+        has_none = type(None) in actual_types
+
+        # Verify it's Optional (has None type)
+        self.assertTrue(
+            has_none, f"Expected timeout to be Optional, but got: {timeout_annotation}"
+        )
+
+        if has_float and not has_int:
+            self.fail(
+                "HttpOptions timeout field now expects float (likely seconds). "
+                "Update GeminiWrapper to not multiply by 1000. "
+                f"Current annotation: {timeout_annotation}"
+            )
+        elif has_int and not has_float:
+            # This is our current expectation - timeout in milliseconds as int
+            pass
+        else:
+            self.fail(
+                f"Unexpected timeout field type annotation: {timeout_annotation}. "
+                "Please review the HttpOptions API documentation and update the test."
+            )
+
+        # Test that float values are rejected (confirming it expects int milliseconds)
+        with self.assertRaises((TypeError, ValueError)):
+            types.HttpOptions(timeout=30.5)  # Should fail if it expects int
+
+    @patch("llm_interface.gemini.genai.Client")
+    def test_dynamic_timeout_detection(self, mock_genai_client):
+        """Test that the dynamic timeout detection logic works correctly."""
+        # Mock the client to avoid actual API calls
+        mock_client_instance = MagicMock()
+        mock_genai_client.return_value = mock_client_instance
+
+        # Create a wrapper instance to test the dynamic detection
+        wrapper = GeminiWrapper(api_key="test_key")
+
+        # Test the _get_appropriate_timeout_value method directly
+        # With current API (expects int milliseconds), 30 seconds should become 30000 ms
+        result = wrapper._get_appropriate_timeout_value(30.0)
+
+        # The result should be an integer (milliseconds) with current API
+        self.assertIsInstance(
+            result, int, "Expected integer result for current API (milliseconds)"
+        )
+        self.assertEqual(
+            result, 30000, "30 seconds should convert to 30000 milliseconds"
+        )
+
+        # Test with fractional seconds
+        result_fractional = wrapper._get_appropriate_timeout_value(30.5)
+        self.assertIsInstance(
+            result_fractional, int, "Expected integer result for fractional seconds"
+        )
+        self.assertEqual(
+            result_fractional,
+            30500,
+            "30.5 seconds should convert to 30500 milliseconds",
+        )
+
+        # Test edge cases
+        result_zero = wrapper._get_appropriate_timeout_value(0.0)
+        self.assertEqual(result_zero, 0, "0 seconds should convert to 0 milliseconds")
+
+        result_large = wrapper._get_appropriate_timeout_value(600.0)
+        self.assertEqual(
+            result_large, 600000, "600 seconds should convert to 600000 milliseconds"
+        )
+
     @patch("llm_interface.gemini.convert_gemini_models_to_ollama_response")
     def test_list(self, mock_convert):
         mock_models_list = [MockGenaiModel(name="model1")]
