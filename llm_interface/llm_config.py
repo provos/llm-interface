@@ -33,6 +33,16 @@ def supports_structured_output(model_name: str) -> bool:
     Returns:
         bool: Whether the model supports structured outputs
     """
+    # Check if this is a GPT model with version 5 or higher
+    # This handles both base models and dated variants (e.g., gpt-5, gpt-5-mini, gpt-5-2025-01-01)
+    if model_name.startswith("gpt-"):
+        # Extract the version number after "gpt-"
+        parts = model_name[4:].split("-")
+        if parts and parts[0].isdigit():
+            version = int(parts[0])
+            if version >= 5:
+                return True
+
     # Models that always support structured outputs (no date requirements)
     base_models = {
         "gpt-4o",

@@ -33,6 +33,24 @@ class TestLLMConfig(unittest.TestCase):
         self.assertFalse(supports_structured_output("o3-mini-2025-01-30"))
         self.assertFalse(supports_structured_output("o1-2024-12-16"))
 
+    def test_gpt5_models(self):
+        """Test that GPT-5 and its variants automatically support structured outputs."""
+        # Base GPT-5 models
+        self.assertTrue(supports_structured_output("gpt-5"))
+        self.assertTrue(supports_structured_output("gpt-5-mini"))
+        self.assertTrue(supports_structured_output("gpt-5-nano"))
+
+        # GPT-5 models with dates
+        self.assertTrue(supports_structured_output("gpt-5-2025-01-01"))
+        self.assertTrue(supports_structured_output("gpt-5-mini-2025-06-15"))
+        self.assertTrue(supports_structured_output("gpt-5-nano-2026-12-31"))
+
+        # Future GPT versions should also work
+        self.assertTrue(supports_structured_output("gpt-6"))
+        self.assertTrue(supports_structured_output("gpt-6-mini"))
+        self.assertTrue(supports_structured_output("gpt-10"))
+        self.assertTrue(supports_structured_output("gpt-10-ultra-2030-01-01"))
+
     def test_unsupported_models(self):
         """Test models that should not support structured outputs."""
         self.assertFalse(supports_structured_output("o1-mini"))
