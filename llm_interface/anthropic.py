@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import logging
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -40,15 +41,24 @@ def translate_tools_for_anthropic(tools: List[Dict[str, Any]]) -> List[Dict[str,
         function = tool["function"]
 
         # Assuming Tool objects have keys 'name', 'description', and 'parameters' which is a dict
+        input_schema = {
+            "type": "object",
+            "properties": function["parameters"]["properties"],
+            "required": function["parameters"]["required"],
+        }
         translated_tool = {
             "name": function["name"],
             "description": function["description"],
-            "input_schema": {
-                "type": "object",
-                "properties": function["parameters"]["properties"],
-                "required": function["parameters"]["required"],
-            },
+            "input_schema": input_schema,
         }
+
+        # Strict tool use: mirror OpenAI's `strict` flag onto Anthropic's schema.
+        # Anthropic expects `strict` alongside the tool definition and
+        # `additionalProperties: False` inside the input_schema itself.
+        if function.get("strict"):
+            translated_tool["strict"] = True
+            input_schema["additionalProperties"] = False
+
         anthropic_tools.append(translated_tool)
 
     return anthropic_tools
@@ -60,13 +70,25 @@ def translate_messages_for_anthropic(
     """
     Translate messages from Ollama/API format to Anthropic format.
 
+    An assistant message carrying N tool_calls becomes ONE assistant message
+    whose content is an optional text block (only when the message has
+    non-empty content) followed by N `tool_use` blocks. Consecutive `tool` role
+    messages are merged into a single `user` message containing one
+    `tool_result` block per call - Anthropic requires every tool_result for a
+    turn to be returned together. Plain user/assistant/system-free
+    conversations pass through unchanged, so this function is safe to call
+    unconditionally.
+
     Args:
         messages (List[Dict[str, Any]]): List of message dictionaries in Ollama format
 
     Returns:
         List[Dict[str, Any]]: Translated messages in Anthropic format
     """
-    translated_messages = []
+    translated_messages: List[Dict[str, Any]] = []
+    # Reference to the content list of the most recently appended tool_result
+    # group, so consecutive tool messages get merged into one user message.
+    current_tool_result_group: Optional[List[Dict[str, Any]]] = None
 
     for msg in messages:
         if "images" in msg and msg["images"]:
@@ -83,47 +105,60 @@ def translate_messages_for_anthropic(
                     }
                 )
             translated_messages.append({"role": "user", "content": content})
+            current_tool_result_group = None
+
         elif msg["role"] == "user":
             # Regular user messages pass through unchanged
             translated_messages.append({"role": "user", "content": msg["content"]})
+            current_tool_result_group = None
 
-        elif msg["role"] == "assistant" and "tool_calls" in msg:
-            # Convert assistant tool calls to Anthropic format
-            tool_call = msg["tool_calls"][0]  # Assume single tool call for now
-            translated_messages.append(
-                {
-                    "role": "assistant",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": f"<thinking>I need to use {tool_call['function']['name']} to help answer this question.</thinking>",
-                        },
-                        {
-                            "type": "tool_use",
-                            "id": tool_call["id"],
-                            "name": tool_call["function"]["name"],
-                            "input": tool_call["function"]["arguments"],
-                        },
-                    ],
-                }
-            )
+        elif msg["role"] == "assistant" and msg.get("tool_calls"):
+            # Convert every tool call made in this turn into one tool_use block
+            # on a single assistant message.
+            content = []
+            if msg.get("content"):
+                content.append({"type": "text", "text": msg["content"]})
+
+            for tool_call in msg["tool_calls"]:
+                function = tool_call["function"]
+                tool_input = function["arguments"]
+                if isinstance(tool_input, str):
+                    tool_input = json.loads(tool_input)
+                content.append(
+                    {
+                        "type": "tool_use",
+                        "id": tool_call["id"],
+                        "name": function["name"],
+                        "input": tool_input,
+                    }
+                )
+
+            translated_messages.append({"role": "assistant", "content": content})
+            current_tool_result_group = None
 
         elif msg["role"] == "tool":
-            # Convert tool response to Anthropic's tool_result format
-            translated_messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": msg["tool_call_id"],
-                            "content": msg["content"],
-                        }
-                    ],
-                }
-            )
+            # Convert tool response to Anthropic's tool_result format, merging
+            # consecutive tool messages into one user message.
+            tool_result: Dict[str, Any] = {
+                "type": "tool_result",
+                "tool_use_id": msg["tool_call_id"],
+                "content": msg["content"],
+            }
+            if msg.get("is_error"):
+                tool_result["is_error"] = True
+
+            if current_tool_result_group is not None:
+                current_tool_result_group.append(tool_result)
+            else:
+                current_tool_result_group = [tool_result]
+                translated_messages.append(
+                    {"role": "user", "content": current_tool_result_group}
+                )
+
         elif msg["role"] == "assistant":
+            # Assistant messages with plain string content pass through.
             translated_messages.append(msg)
+            current_tool_result_group = None
         else:
             raise ValueError(f"Unknown message role: {msg['role']}")
 
@@ -170,10 +205,39 @@ def convert_anthropic_models_to_ollama_response(
 
 
 class AnthropicWrapper:
-    def __init__(self, api_key: str, max_tokens: int = 4096, timeout: float = 600.0):
+    def __init__(
+        self,
+        api_key: str,
+        max_tokens: int = 4096,
+        timeout: float = 600.0,
+        prompt_caching: bool = True,
+        thinking: Optional[Dict[str, Any]] = None,
+        effort: Optional[str] = None,
+    ):
+        """
+        Args:
+            api_key (str): Anthropic API key.
+            max_tokens (int): Default max_tokens for requests. Values above ~16k
+                should use streaming to avoid HTTP timeouts; this wrapper does not
+                stream yet (future work).
+            timeout (float): Request timeout in seconds.
+            prompt_caching (bool): When True (the default), every request carries
+                top-level `cache_control={"type": "ephemeral"}`, which auto-caches
+                the last cacheable block - useful for a growing tool-call
+                transcript.
+            thinking (Optional[Dict[str, Any]]): Extended thinking configuration,
+                e.g. {"type": "adaptive"}. When set, `temperature` is never sent
+                (current models reject it together with thinking) and
+                `budget_tokens` is never used.
+            effort (Optional[str]): One of low|medium|high|xhigh|max. Forwarded as
+                `output_config.effort`.
+        """
         self.client = Anthropic(api_key=api_key, timeout=timeout)
         self.api_key = api_key
         self.max_tokens = max_tokens
+        self.prompt_caching = prompt_caching
+        self.thinking = thinking
+        self.effort = effort
 
     def chat(
         self,
@@ -186,7 +250,16 @@ class AnthropicWrapper:
 
         Args:
             messages (list[Mapping[str, str]]): A list of message dictionaries, each containing 'role' and 'content'.
-            **kwargs: Additional arguments to pass to the generate function.
+            tools (Optional[List[Dict[str, Any]]]): Tool definitions in Ollama/OpenAI format.
+            **kwargs: Additional arguments, including:
+                - model (str): The Anthropic model to use.
+                - max_tokens (int): Overrides the instance's max_tokens.
+                - options (dict): May contain "temperature".
+                - response_schema (Type[BaseModel]): When provided, uses
+                  `client.messages.parse(...)` for structured output instead of
+                  `client.messages.create(...)`.
+                - tool_choice (str | dict): "none" -> {"type": "none"},
+                  "auto" -> {"type": "auto"}, or a dict passed through as-is.
 
         Returns:
             A dictionary containing the Anthropic response formatted to match Ollama's expected output.
@@ -199,14 +272,13 @@ class AnthropicWrapper:
         # Filter out the system message to prevent duplication if it's not needed in the messages parameter
         filtered_messages = [msg for msg in messages if msg["role"] != "system"]
 
-        # Translate messages into Anthropic format
-        if any(msg["role"] == "tool" for msg in filtered_messages) or any(
-            "images" in msg for msg in filtered_messages
-        ):
-            filtered_messages = translate_messages_for_anthropic(filtered_messages)
+        # Always translate: this normalizes tool_calls/tool-result/image
+        # messages into Anthropic's format, and is a no-op for a plain
+        # user/assistant conversation.
+        filtered_messages = translate_messages_for_anthropic(filtered_messages)
 
         # Common parameters
-        params = {
+        params: Dict[str, Any] = {
             "max_tokens": kwargs.get("max_tokens", self.max_tokens),
             "messages": filtered_messages,
             "model": kwargs.get("model", "claude-3-5-sonnet-20240620"),
@@ -216,36 +288,92 @@ class AnthropicWrapper:
         if system_message is not None:
             params["system"] = system_message
 
-        # Conditionally add temperature if it exists in kwargs
-        if "options" in kwargs:
-            if "temperature" in kwargs["options"]:
-                params["temperature"] = kwargs["options"]["temperature"]
+        # Extended thinking / effort.
+        if self.thinking is not None:
+            params["thinking"] = self.thinking
+        if self.effort is not None:
+            params["output_config"] = {"effort": self.effort}
+
+        # Conditionally add temperature if it exists in kwargs. Current models
+        # reject `temperature` when adaptive thinking is configured, so only
+        # send it when the caller explicitly asked for it AND thinking is off.
+        if (
+            self.thinking is None
+            and "options" in kwargs
+            and "temperature" in kwargs["options"]
+        ):
+            params["temperature"] = kwargs["options"]["temperature"]
 
         if tools:
             # Translate tools into Anthropic format
             anthropic_tools = translate_tools_for_anthropic(tools)
             params["tools"] = anthropic_tools
 
+        # tool_choice: "none"/"auto" strings map to Anthropic's dict form; a
+        # dict is passed through untouched.
+        tool_choice = kwargs.get("tool_choice")
+        if tool_choice == "none":
+            params["tool_choice"] = {"type": "none"}
+        elif tool_choice == "auto":
+            params["tool_choice"] = {"type": "auto"}
+        elif isinstance(tool_choice, dict):
+            params["tool_choice"] = tool_choice
+
+        response_schema = kwargs.get("response_schema")
+
         try:
-            # Call the function with the constructed parameters
-            response = self.client.messages.create(**params)
+            if response_schema is not None:
+                # `client.messages.parse` (anthropic 1.4.0) validates the
+                # response against `output_format`. Note it does not accept
+                # `cache_control`, unlike `messages.create`.
+                response = self.client.messages.parse(
+                    output_format=response_schema, **params
+                )
+            else:
+                create_params = dict(params)
+                if self.prompt_caching:
+                    # Auto-caches the last cacheable block - what a growing
+                    # tool-call transcript wants. `max_tokens` above ~16k
+                    # should use streaming instead of `create()` (future work).
+                    create_params["cache_control"] = {"type": "ephemeral"}
+                response = self.client.messages.create(**create_params)
 
             # Extract usage information
             usage = response.usage
             usage_info = {
                 "prompt_tokens": usage.input_tokens,
                 "completion_tokens": usage.output_tokens,
-                "cached_tokens": usage.cache_read_input_tokens,
+                "cached_tokens": usage.cache_read_input_tokens or 0,
                 "total_tokens": usage.input_tokens + usage.output_tokens,
             }
 
-            # Handle tool calls if present
-            if any(block.type == "tool_use" for block in response.content):
-                # Find all tool use blocks
-                tool_use_blocks = [
-                    block for block in response.content if block.type == "tool_use"
-                ]
+            if response.stop_reason == "refusal":
+                stop_details = response.stop_details
+                explanation = (
+                    stop_details.explanation if stop_details is not None else None
+                )
+                return {
+                    "refusal": explanation or "refused",
+                    "content": None,
+                    "done": False,
+                }
 
+            if response.stop_reason == "max_tokens":
+                return {
+                    "error": "Response exceeded the maximum allowed length.",
+                    "error_type": errors.LENGTH,
+                    "content": None,
+                    "done": False,
+                    "usage": None,
+                }
+
+            # Handle tool calls if present. This shape is returned whether or
+            # not `response_schema` was requested (parsed_output is unused
+            # here and stays None on the response in that case).
+            tool_use_blocks = [
+                block for block in response.content if block.type == "tool_use"
+            ]
+            if tool_use_blocks:
                 return {
                     "message": {
                         "content": "",
@@ -258,6 +386,15 @@ class AnthropicWrapper:
                             for tool_block in tool_use_blocks
                         ],
                     },
+                    "usage": usage_info,
+                    "done": response.stop_reason == "end_turn",
+                }
+
+            if response_schema is not None:
+                # `messages.parse` attaches `parsed_output` to the response;
+                # `generate_pydantic` already accepts a BaseModel instance here.
+                return {
+                    "message": {"content": getattr(response, "parsed_output", None)},
                     "usage": usage_info,
                     "done": response.stop_reason == "end_turn",
                 }

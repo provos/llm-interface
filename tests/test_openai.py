@@ -7,7 +7,7 @@ from openai.pagination import SyncPage
 from openai.types import CompletionUsage, Model
 
 import llm_interface.errors as errors
-from llm_interface.openai import OpenAIWrapper
+from llm_interface.openai import OpenAIWrapper, translate_tools_for_openai
 
 
 class TestOpenAIWrapper(unittest.TestCase):
@@ -109,7 +109,7 @@ class TestOpenAIWrapper(unittest.TestCase):
                 completion_tokens=9, prompt_tokens=10, total_tokens=19
             ),
         )
-        self.mock_client.beta.chat.completions.parse.return_value = mock_response
+        self.mock_client.chat.completions.parse.return_value = mock_response
 
         messages = [{"role": "user", "content": "Test message"}]
         response = self.openai_wrapper.chat(
@@ -212,6 +212,135 @@ class TestOpenAIWrapper(unittest.TestCase):
         self.assertEqual(model["details"]["families"], ["openai"])
         self.assertEqual(model["details"]["parameter_size"], "unknown")
         self.assertEqual(model["details"]["quantization_level"], "unknown")
+
+    def test_chat_tool_choice_forwarded(self):
+        self.mock_client.chat.completions.create.return_value = Mock(
+            choices=[
+                Mock(
+                    message=Mock(content="ok", tool_calls=[], done=True),
+                    finish_reason="stop",
+                )
+            ],
+            usage=CompletionUsage(completion_tokens=1, prompt_tokens=1, total_tokens=2),
+        )
+
+        self.openai_wrapper.chat(
+            messages=[{"role": "user", "content": "Hi"}], tool_choice="none"
+        )
+
+        call_kwargs = self.mock_client.chat.completions.create.call_args[1]
+        self.assertEqual(call_kwargs["tool_choice"], "none")
+
+    def test_chat_with_response_schema_uses_non_beta_parse(self):
+        mock_parsed_content = {"parsed": "data"}
+        mock_message = MagicMock(parsed=mock_parsed_content, tool_calls=[], done=True)
+        mock_message.__contains__.side_effect = lambda key: key in mock_message.__dict__
+
+        mock_response = Mock(
+            choices=[Mock(message=mock_message, finish_reason="stop")],
+            usage=CompletionUsage(
+                completion_tokens=9, prompt_tokens=10, total_tokens=19
+            ),
+        )
+        self.mock_client.chat.completions.parse.return_value = mock_response
+
+        messages = [{"role": "user", "content": "Test message"}]
+        self.openai_wrapper.chat(messages=messages, response_schema="DummySchema")
+
+        self.mock_client.chat.completions.parse.assert_called_once()
+        # The deprecated beta namespace must not be used.
+        self.mock_client.beta.chat.completions.parse.assert_not_called()
+
+
+class TestTranslateToolsForOpenAI(unittest.TestCase):
+    """Tests for translate_tools_for_openai's message normalization."""
+
+    def test_does_not_mutate_caller_messages(self):
+        original_messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": {"a": 1}},
+                    }
+                ],
+            }
+        ]
+        snapshot = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": {"a": 1}},
+                    }
+                ],
+            }
+        ]
+
+        translated = translate_tools_for_openai(original_messages)
+
+        # The caller's messages (and nested dicts) must be untouched.
+        self.assertEqual(original_messages, snapshot)
+        self.assertIsInstance(
+            original_messages[0]["tool_calls"][0]["function"]["arguments"], dict
+        )
+        # The translated copy has the arguments stringified.
+        self.assertIsInstance(
+            translated[0]["tool_calls"][0]["function"]["arguments"], str
+        )
+
+    def test_stringifies_arguments_for_every_tool_call_in_one_message(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": {"a": 1}},
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "g", "arguments": {"b": 2}},
+                    },
+                ],
+            }
+        ]
+        translated = translate_tools_for_openai(messages)
+        self.assertEqual(len(translated[0]["tool_calls"]), 2)
+        for tool_call in translated[0]["tool_calls"]:
+            self.assertIsInstance(tool_call["function"]["arguments"], str)
+
+    def test_strips_unsupported_tool_message_keys(self):
+        messages = [
+            {
+                "role": "tool",
+                "name": "f",
+                "tool_call_id": "call_1",
+                "content": "result",
+                "is_error": True,
+            }
+        ]
+        translated = translate_tools_for_openai(messages)
+        self.assertEqual(len(translated), 1)
+        self.assertNotIn("name", translated[0])
+        self.assertNotIn("is_error", translated[0])
+        self.assertEqual(translated[0]["role"], "tool")
+        self.assertEqual(translated[0]["tool_call_id"], "call_1")
+        self.assertEqual(translated[0]["content"], "result")
+
+    def test_plain_messages_pass_through(self):
+        messages = [{"role": "user", "content": "Hello"}]
+        translated = translate_tools_for_openai(messages)
+        self.assertEqual(translated, messages)
 
 
 if __name__ == "__main__":

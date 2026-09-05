@@ -3,8 +3,14 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, Mock, patch
 
 from anthropic import APIConnectionError, APIError, APITimeoutError
+from pydantic import BaseModel
 
-from llm_interface.anthropic import AnthropicWrapper
+import llm_interface.errors as errors
+from llm_interface.anthropic import (
+    AnthropicWrapper,
+    translate_messages_for_anthropic,
+    translate_tools_for_anthropic,
+)
 
 
 class TestAnthropicWrapper(unittest.TestCase):
@@ -261,6 +267,310 @@ class TestAnthropicWrapper(unittest.TestCase):
         response = self.anthropic_wrapper.chat([{"role": "user", "content": "Hello"}])
         self.assertIn("error", response)
         self.assertEqual(response["error_type"], "provider_specific")
+
+
+class TestTranslateMessagesForAnthropic(unittest.TestCase):
+    """Tests for translate_messages_for_anthropic covering multi tool-call
+    turns, merged tool_result groups, and the no-op case."""
+
+    def test_translate_multiple_tool_calls_single_message(self):
+        messages = [
+            {"role": "user", "content": "What's the weather in two cities?"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": {"location": "SF"},
+                        },
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": {"location": "NYC"},
+                        },
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "Sunny in SF"},
+            {
+                "role": "tool",
+                "tool_call_id": "call_2",
+                "content": "Error: tool failed",
+                "is_error": True,
+            },
+        ]
+
+        translated = translate_messages_for_anthropic(messages)
+
+        # user, assistant (2 tool_use blocks), ONE merged tool_result message
+        self.assertEqual(len(translated), 3)
+
+        assistant_msg = translated[1]
+        self.assertEqual(assistant_msg["role"], "assistant")
+        tool_use_blocks = [
+            b for b in assistant_msg["content"] if b["type"] == "tool_use"
+        ]
+        self.assertEqual(len(tool_use_blocks), 2)
+        # The fabricated <thinking> text block must be gone entirely.
+        self.assertFalse(any(b["type"] == "text" for b in assistant_msg["content"]))
+        self.assertEqual(tool_use_blocks[0]["input"], {"location": "SF"})
+        self.assertEqual(tool_use_blocks[1]["input"], {"location": "NYC"})
+
+        tool_result_msg = translated[2]
+        self.assertEqual(tool_result_msg["role"], "user")
+        self.assertEqual(len(tool_result_msg["content"]), 2)
+        self.assertEqual(tool_result_msg["content"][0]["tool_use_id"], "call_1")
+        self.assertNotIn("is_error", tool_result_msg["content"][0])
+        self.assertEqual(tool_result_msg["content"][1]["tool_use_id"], "call_2")
+        self.assertTrue(tool_result_msg["content"][1]["is_error"])
+
+    def test_translate_string_tool_arguments_parsed_to_dict(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"location": "SF"}',
+                        },
+                    }
+                ],
+            }
+        ]
+        translated = translate_messages_for_anthropic(messages)
+        tool_use_block = translated[0]["content"][0]
+        self.assertIsInstance(tool_use_block["input"], dict)
+        self.assertEqual(tool_use_block["input"], {"location": "SF"})
+
+    def test_translate_noop_for_plain_conversation(self):
+        messages = [
+            {"role": "user", "content": "Hello"},
+            {"role": "assistant", "content": "Hi there"},
+        ]
+        translated = translate_messages_for_anthropic(messages)
+        self.assertEqual(translated, messages)
+
+    def test_translate_non_consecutive_tool_messages_not_merged(self):
+        messages = [
+            {"role": "tool", "tool_call_id": "call_1", "content": "first"},
+            {"role": "user", "content": "in between"},
+            {"role": "tool", "tool_call_id": "call_2", "content": "second"},
+        ]
+        translated = translate_messages_for_anthropic(messages)
+        # Two separate tool_result groups since they aren't consecutive.
+        self.assertEqual(len(translated), 3)
+        self.assertEqual(len(translated[0]["content"]), 1)
+        self.assertEqual(translated[1]["role"], "user")
+        self.assertEqual(len(translated[2]["content"]), 1)
+
+
+class TestTranslateToolsForAnthropic(unittest.TestCase):
+    def test_strict_tool_gets_additional_properties_false(self):
+        tools = [
+            {
+                "function": {
+                    "name": "get_weather",
+                    "description": "desc",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                    },
+                    "strict": True,
+                }
+            }
+        ]
+        translated = translate_tools_for_anthropic(tools)
+        self.assertTrue(translated[0]["strict"])
+        self.assertFalse(translated[0]["input_schema"]["additionalProperties"])
+
+    def test_non_strict_tool_has_no_strict_keys(self):
+        tools = [
+            {
+                "function": {
+                    "name": "get_weather",
+                    "description": "desc",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                    },
+                }
+            }
+        ]
+        translated = translate_tools_for_anthropic(tools)
+        self.assertNotIn("strict", translated[0])
+        self.assertNotIn("additionalProperties", translated[0]["input_schema"])
+
+
+class TestAnthropicWrapperStructuredOutputsAndOptions(unittest.TestCase):
+    def setUp(self):
+        self.api_key = "test_api_key"
+        self.mock_client = MagicMock()
+        self.wrapper = AnthropicWrapper(api_key=self.api_key)
+        self.wrapper.client = self.mock_client
+
+    @staticmethod
+    def _make_text_response(text="ok", stop_reason="end_turn", cache_read=0):
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(type="text", text=text)]
+        mock_response.stop_reason = stop_reason
+        mock_response.stop_details = None
+        mock_response.usage.input_tokens = 5
+        mock_response.usage.output_tokens = 1
+        mock_response.usage.cache_read_input_tokens = cache_read
+        return mock_response
+
+    def test_parse_called_with_output_format_and_no_cache_control(self):
+        class Person(BaseModel):
+            name: str
+
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(type="text", text='{"name": "Alice"}')]
+        mock_response.stop_reason = "end_turn"
+        mock_response.stop_details = None
+        mock_response.usage.input_tokens = 10
+        mock_response.usage.output_tokens = 5
+        mock_response.usage.cache_read_input_tokens = 0
+        mock_response.parsed_output = Person(name="Alice")
+
+        self.mock_client.messages.parse.return_value = mock_response
+
+        response = self.wrapper.chat(
+            messages=[{"role": "user", "content": "Who is it?"}],
+            response_schema=Person,
+        )
+
+        self.mock_client.messages.parse.assert_called_once()
+        self.mock_client.messages.create.assert_not_called()
+        call_kwargs = self.mock_client.messages.parse.call_args[1]
+        self.assertEqual(call_kwargs["output_format"], Person)
+        # anthropic 1.4.0's messages.parse does not accept cache_control.
+        self.assertNotIn("cache_control", call_kwargs)
+
+        self.assertEqual(response["message"]["content"], Person(name="Alice"))
+        self.assertTrue(response["done"])
+
+    def test_create_called_with_cache_control_by_default(self):
+        self.mock_client.messages.create.return_value = self._make_text_response()
+
+        self.wrapper.chat(messages=[{"role": "user", "content": "Hi"}])
+
+        call_kwargs = self.mock_client.messages.create.call_args[1]
+        self.assertEqual(call_kwargs["cache_control"], {"type": "ephemeral"})
+
+    def test_prompt_caching_disabled(self):
+        wrapper = AnthropicWrapper(api_key=self.api_key, prompt_caching=False)
+        wrapper.client = self.mock_client
+        self.mock_client.messages.create.return_value = self._make_text_response()
+
+        wrapper.chat(messages=[{"role": "user", "content": "Hi"}])
+
+        call_kwargs = self.mock_client.messages.create.call_args[1]
+        self.assertNotIn("cache_control", call_kwargs)
+
+    def test_refusal_stop_reason(self):
+        mock_response = self._make_text_response(stop_reason="refusal")
+        mock_response.stop_details = MagicMock(explanation="policy violation")
+        self.mock_client.messages.create.return_value = mock_response
+
+        response = self.wrapper.chat(messages=[{"role": "user", "content": "Hi"}])
+
+        self.assertEqual(response["refusal"], "policy violation")
+        self.assertIsNone(response["content"])
+        self.assertFalse(response["done"])
+
+    def test_refusal_without_explanation_defaults_to_refused(self):
+        mock_response = self._make_text_response(stop_reason="refusal")
+        mock_response.stop_details = None
+        self.mock_client.messages.create.return_value = mock_response
+
+        response = self.wrapper.chat(messages=[{"role": "user", "content": "Hi"}])
+        self.assertEqual(response["refusal"], "refused")
+
+    def test_max_tokens_stop_reason(self):
+        mock_response = self._make_text_response(stop_reason="max_tokens")
+        self.mock_client.messages.create.return_value = mock_response
+
+        response = self.wrapper.chat(messages=[{"role": "user", "content": "Hi"}])
+        self.assertEqual(response["error_type"], errors.LENGTH)
+        self.assertIsNone(response["content"])
+        self.assertFalse(response["done"])
+
+    def test_tool_choice_none_mapping(self):
+        self.mock_client.messages.create.return_value = self._make_text_response()
+
+        self.wrapper.chat(
+            messages=[{"role": "user", "content": "Hi"}], tool_choice="none"
+        )
+        call_kwargs = self.mock_client.messages.create.call_args[1]
+        self.assertEqual(call_kwargs["tool_choice"], {"type": "none"})
+
+    def test_tool_choice_auto_mapping(self):
+        self.mock_client.messages.create.return_value = self._make_text_response()
+
+        self.wrapper.chat(
+            messages=[{"role": "user", "content": "Hi"}], tool_choice="auto"
+        )
+        call_kwargs = self.mock_client.messages.create.call_args[1]
+        self.assertEqual(call_kwargs["tool_choice"], {"type": "auto"})
+
+    def test_tool_choice_dict_passthrough(self):
+        self.mock_client.messages.create.return_value = self._make_text_response()
+
+        explicit_choice = {"type": "tool", "name": "get_weather"}
+        self.wrapper.chat(
+            messages=[{"role": "user", "content": "Hi"}],
+            tool_choice=explicit_choice,
+        )
+        call_kwargs = self.mock_client.messages.create.call_args[1]
+        self.assertEqual(call_kwargs["tool_choice"], explicit_choice)
+
+    def test_thinking_and_effort_forwarded_without_temperature(self):
+        wrapper = AnthropicWrapper(
+            api_key=self.api_key, thinking={"type": "adaptive"}, effort="high"
+        )
+        wrapper.client = self.mock_client
+        self.mock_client.messages.create.return_value = self._make_text_response()
+
+        wrapper.chat(
+            messages=[{"role": "user", "content": "Hi"}],
+            options={"temperature": 0.9},
+        )
+
+        call_kwargs = self.mock_client.messages.create.call_args[1]
+        self.assertEqual(call_kwargs["thinking"], {"type": "adaptive"})
+        self.assertEqual(call_kwargs["output_config"], {"effort": "high"})
+        # Current models reject temperature when adaptive thinking is on.
+        self.assertNotIn("temperature", call_kwargs)
+
+    def test_temperature_sent_when_thinking_not_configured(self):
+        self.mock_client.messages.create.return_value = self._make_text_response()
+
+        self.wrapper.chat(
+            messages=[{"role": "user", "content": "Hi"}],
+            options={"temperature": 0.5},
+        )
+        call_kwargs = self.mock_client.messages.create.call_args[1]
+        self.assertEqual(call_kwargs["temperature"], 0.5)
+
+    def test_cache_read_input_tokens_none_guarded(self):
+        mock_response = self._make_text_response(cache_read=None)
+        self.mock_client.messages.create.return_value = mock_response
+
+        response = self.wrapper.chat(messages=[{"role": "user", "content": "Hi"}])
+        self.assertEqual(response["usage"]["cached_tokens"], 0)
 
 
 if __name__ == "__main__":

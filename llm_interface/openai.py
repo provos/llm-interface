@@ -28,21 +28,47 @@ from . import errors
 
 
 def translate_tools_for_openai(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    messages = messages.copy()
+    """
+    Normalize messages for the OpenAI Chat Completions API without mutating the
+    caller's messages or message dicts.
+
+    - Stringifies a dict-valued `function.arguments` on assistant `tool_calls`
+      entries (OpenAI requires a JSON string; a single assistant message may
+      carry multiple tool_calls and all are handled here).
+    - Strips keys that `ChatCompletionToolMessageParam` doesn't accept (`name`,
+      `is_error`) from `tool` role messages, keeping only `role`, `content`,
+      and `tool_call_id`.
+    """
+    translated_messages: List[Dict[str, Any]] = []
+
     for message in messages:
         if "tool_calls" in message:
+            new_message = dict(message)
+            new_tool_calls = []
             for tool_call in message["tool_calls"]:
-                if (
-                    "function" not in tool_call
-                    or "arguments" not in tool_call["function"]
+                new_tool_call = dict(tool_call)
+                function = new_tool_call.get("function")
+                if isinstance(function, dict) and isinstance(
+                    function.get("arguments"), dict
                 ):
-                    continue
-                if isinstance(tool_call["function"]["arguments"], dict):
-                    tool_call["function"]["arguments"] = json.dumps(
-                        tool_call["function"]["arguments"]
-                    )
+                    new_function = dict(function)
+                    new_function["arguments"] = json.dumps(function["arguments"])
+                    new_tool_call["function"] = new_function
+                new_tool_calls.append(new_tool_call)
+            new_message["tool_calls"] = new_tool_calls
+            translated_messages.append(new_message)
+        elif message.get("role") == "tool":
+            translated_messages.append(
+                {
+                    "role": "tool",
+                    "content": message.get("content", ""),
+                    "tool_call_id": message.get("tool_call_id", ""),
+                }
+            )
+        else:
+            translated_messages.append(message)
 
-    return messages
+    return translated_messages
 
 
 def transform_messages_with_images(
@@ -164,6 +190,7 @@ class OpenAIWrapper:
                 - max_tokens (int): Maximum number of tokens for the API call. Defaults to the instance's max_tokens.
                 - temperature (float): The temperature setting for the response generation.
                 - response_schema (Type[BaseModel]): An optional Pydantic model for structured output.
+                - tool_choice (str | dict): Forwarded as-is to the API (e.g. "none", "auto").
 
         Returns:
             Dict[str, Any]: If a `response_schema` is specified, returns a dictionary containing parsed content
@@ -200,11 +227,16 @@ class OpenAIWrapper:
             if "temperature" in kwargs["options"]:
                 api_params["temperature"] = kwargs["options"]["temperature"]
 
+        if kwargs.get("tool_choice") is not None:
+            api_params["tool_choice"] = kwargs["tool_choice"]
+
         logging.debug("API parameters: %s", api_params)
 
         try:
             if "response_schema" in kwargs:
-                response = self.client.beta.chat.completions.parse(
+                # `client.beta.chat.completions.parse` is deprecated in openai
+                # 3.x; use the stable `client.chat.completions.parse` instead.
+                response = self.client.chat.completions.parse(
                     response_format=kwargs.get("response_schema"),
                     **api_params,
                 )
