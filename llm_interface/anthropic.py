@@ -437,6 +437,21 @@ class AnthropicWrapper:
                 "done": False,
                 "usage": None,
             }
+        except Exception as e:
+            # The streaming accumulator validates structured output as blocks
+            # complete and raises a pydantic ValidationError when a text block
+            # is empty or truncated (for example when thinking exhausted
+            # max_tokens). Surface it as a model error so generate_pydantic
+            # can retry instead of crashing the caller.
+            error_message = f"Anthropic response could not be parsed: {str(e)}"
+            logging.error(error_message)
+            return {
+                "error": error_message,
+                "error_type": errors.PROVIDER_SPECIFIC,
+                "content": None,
+                "done": False,
+                "usage": None,
+            }
 
     def list(self) -> ListResponse:
         """

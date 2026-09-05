@@ -585,3 +585,27 @@ class TestAnthropicWrapperStructuredOutputsAndOptions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAnthropicStreamParseFailure(unittest.TestCase):
+    def test_validation_error_during_stream_becomes_model_error(self):
+        from pydantic import ValidationError
+
+        wrapper = AnthropicWrapper(api_key="k")
+        wrapper.client = MagicMock()
+        manager = MagicMock()
+        manager.__enter__.return_value.get_final_message.side_effect = (
+            ValidationError.from_exception_data("X", [])
+        )
+        manager.__exit__.return_value = False
+        wrapper.client.messages.stream.return_value = manager
+
+        class Person(BaseModel):
+            name: str
+
+        response = wrapper.chat(
+            messages=[{"role": "user", "content": "hi"}], response_schema=Person
+        )
+        self.assertIn("error", response)
+        self.assertIn("could not be parsed", response["error"])
+        self.assertIsNone(response["content"])
