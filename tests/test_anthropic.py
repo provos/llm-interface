@@ -13,6 +13,15 @@ from llm_interface.anthropic import (
 )
 
 
+def _stub_stream(mock_client, response):
+    """Make ``client.messages.stream(...)`` a context manager yielding ``response``."""
+    manager = MagicMock()
+    manager.__enter__.return_value.get_final_message.return_value = response
+    manager.__exit__.return_value = False
+    mock_client.messages.stream.return_value = manager
+    return manager
+
+
 class TestAnthropicWrapper(unittest.TestCase):
     def setUp(self):
         self.api_key = "test_api_key"
@@ -78,7 +87,7 @@ class TestAnthropicWrapper(unittest.TestCase):
         mock_response.usage.output_tokens = 5
         mock_response.usage.cache_read_input_tokens = 0
 
-        self.mock_client.messages.create.return_value = mock_response
+        _stub_stream(self.mock_client, mock_response)
 
         # Create test messages
         messages = [
@@ -92,8 +101,8 @@ class TestAnthropicWrapper(unittest.TestCase):
         )
 
         # Verify correct parameters passed to Anthropic
-        self.mock_client.messages.create.assert_called_once()
-        call_args = self.mock_client.messages.create.call_args[1]
+        self.mock_client.messages.stream.assert_called_once()
+        call_args = self.mock_client.messages.stream.call_args[1]
         self.assertEqual(call_args["system"], "You are a helpful assistant.")
         self.assertEqual(call_args["model"], "claude-3-sonnet-20240229")
         self.assertEqual(len(call_args["messages"]), 1)
@@ -120,7 +129,7 @@ class TestAnthropicWrapper(unittest.TestCase):
         mock_response.usage.output_tokens = 10
         mock_response.usage.cache_read_input_tokens = 0
 
-        self.mock_client.messages.create.return_value = mock_response
+        _stub_stream(self.mock_client, mock_response)
 
         # Define tools and messages
         tools = [
@@ -148,8 +157,8 @@ class TestAnthropicWrapper(unittest.TestCase):
         response = self.anthropic_wrapper.chat(messages, tools=tools)
 
         # Verify correct parameters passed to Anthropic
-        self.mock_client.messages.create.assert_called_once()
-        call_args = self.mock_client.messages.create.call_args[1]
+        self.mock_client.messages.stream.assert_called_once()
+        call_args = self.mock_client.messages.stream.call_args[1]
         self.assertEqual(len(call_args["tools"]), 1)
         self.assertEqual(call_args["tools"][0]["name"], "search_weather")
 
@@ -170,7 +179,7 @@ class TestAnthropicWrapper(unittest.TestCase):
         mock_response.usage.output_tokens = 8
         mock_response.usage.cache_read_input_tokens = 0
 
-        self.mock_client.messages.create.return_value = mock_response
+        _stub_stream(self.mock_client, mock_response)
 
         # Create messages with tool response
         messages = [
@@ -198,7 +207,7 @@ class TestAnthropicWrapper(unittest.TestCase):
         response = self.anthropic_wrapper.chat(messages)
 
         # Verify translated messages were passed correctly
-        call_args = self.mock_client.messages.create.call_args[1]
+        call_args = self.mock_client.messages.stream.call_args[1]
         translated_messages = call_args["messages"]
         self.assertEqual(len(translated_messages), 3)
 
@@ -222,7 +231,7 @@ class TestAnthropicWrapper(unittest.TestCase):
         mock_response.usage.output_tokens = 7
         mock_response.usage.cache_read_input_tokens = 0
 
-        self.mock_client.messages.create.return_value = mock_response
+        _stub_stream(self.mock_client, mock_response)
 
         # Create messages with images
         messages = [
@@ -236,7 +245,7 @@ class TestAnthropicWrapper(unittest.TestCase):
         response = self.anthropic_wrapper.chat(messages)
 
         # Verify image translation
-        call_args = self.mock_client.messages.create.call_args[1]
+        call_args = self.mock_client.messages.stream.call_args[1]
         translated_messages = call_args["messages"]
         self.assertEqual(len(translated_messages), 1)
         self.assertEqual(len(translated_messages[0]["content"]), 2)  # Text + image
@@ -247,13 +256,13 @@ class TestAnthropicWrapper(unittest.TestCase):
 
     def test_chat_error_handling(self):
         # Test timeout error
-        self.mock_client.messages.create.side_effect = APITimeoutError(request=Mock())
+        self.mock_client.messages.stream.side_effect = APITimeoutError(request=Mock())
         response = self.anthropic_wrapper.chat([{"role": "user", "content": "Hello"}])
         self.assertIn("error", response)
         self.assertEqual(response["error_type"], "timeout")
 
         # Test connection error
-        self.mock_client.messages.create.side_effect = APIConnectionError(
+        self.mock_client.messages.stream.side_effect = APIConnectionError(
             request=Mock(), message="Connection error"
         )
         response = self.anthropic_wrapper.chat([{"role": "user", "content": "Hello"}])
@@ -261,7 +270,7 @@ class TestAnthropicWrapper(unittest.TestCase):
         self.assertEqual(response["error_type"], "connection")
 
         # Test API error
-        self.mock_client.messages.create.side_effect = APIError(
+        self.mock_client.messages.stream.side_effect = APIError(
             request=Mock(), message="API error", body=None
         )
         response = self.anthropic_wrapper.chat([{"role": "user", "content": "Hello"}])
@@ -432,7 +441,7 @@ class TestAnthropicWrapperStructuredOutputsAndOptions(unittest.TestCase):
         mock_response.usage.cache_read_input_tokens = cache_read
         return mock_response
 
-    def test_parse_called_with_output_format_and_no_cache_control(self):
+    def test_structured_call_streams_with_output_format_and_cache_control(self):
         class Person(BaseModel):
             name: str
 
@@ -445,45 +454,46 @@ class TestAnthropicWrapperStructuredOutputsAndOptions(unittest.TestCase):
         mock_response.usage.cache_read_input_tokens = 0
         mock_response.parsed_output = Person(name="Alice")
 
-        self.mock_client.messages.parse.return_value = mock_response
+        _stub_stream(self.mock_client, mock_response)
 
         response = self.wrapper.chat(
             messages=[{"role": "user", "content": "Who is it?"}],
             response_schema=Person,
         )
 
-        self.mock_client.messages.parse.assert_called_once()
+        self.mock_client.messages.stream.assert_called_once()
         self.mock_client.messages.create.assert_not_called()
-        call_kwargs = self.mock_client.messages.parse.call_args[1]
+        self.mock_client.messages.parse.assert_not_called()
+        call_kwargs = self.mock_client.messages.stream.call_args[1]
         self.assertEqual(call_kwargs["output_format"], Person)
-        # anthropic 1.4.0's messages.parse does not accept cache_control.
-        self.assertNotIn("cache_control", call_kwargs)
+        # structured calls keep prompt caching: stream() accepts both
+        self.assertEqual(call_kwargs["cache_control"], {"type": "ephemeral"})
 
         self.assertEqual(response["message"]["content"], Person(name="Alice"))
         self.assertTrue(response["done"])
 
-    def test_create_called_with_cache_control_by_default(self):
-        self.mock_client.messages.create.return_value = self._make_text_response()
+    def test_stream_called_with_cache_control_by_default(self):
+        _stub_stream(self.mock_client, self._make_text_response())
 
         self.wrapper.chat(messages=[{"role": "user", "content": "Hi"}])
 
-        call_kwargs = self.mock_client.messages.create.call_args[1]
+        call_kwargs = self.mock_client.messages.stream.call_args[1]
         self.assertEqual(call_kwargs["cache_control"], {"type": "ephemeral"})
 
     def test_prompt_caching_disabled(self):
         wrapper = AnthropicWrapper(api_key=self.api_key, prompt_caching=False)
         wrapper.client = self.mock_client
-        self.mock_client.messages.create.return_value = self._make_text_response()
+        _stub_stream(self.mock_client, self._make_text_response())
 
         wrapper.chat(messages=[{"role": "user", "content": "Hi"}])
 
-        call_kwargs = self.mock_client.messages.create.call_args[1]
+        call_kwargs = self.mock_client.messages.stream.call_args[1]
         self.assertNotIn("cache_control", call_kwargs)
 
     def test_refusal_stop_reason(self):
         mock_response = self._make_text_response(stop_reason="refusal")
         mock_response.stop_details = MagicMock(explanation="policy violation")
-        self.mock_client.messages.create.return_value = mock_response
+        _stub_stream(self.mock_client, mock_response)
 
         response = self.wrapper.chat(messages=[{"role": "user", "content": "Hi"}])
 
@@ -494,14 +504,14 @@ class TestAnthropicWrapperStructuredOutputsAndOptions(unittest.TestCase):
     def test_refusal_without_explanation_defaults_to_refused(self):
         mock_response = self._make_text_response(stop_reason="refusal")
         mock_response.stop_details = None
-        self.mock_client.messages.create.return_value = mock_response
+        _stub_stream(self.mock_client, mock_response)
 
         response = self.wrapper.chat(messages=[{"role": "user", "content": "Hi"}])
         self.assertEqual(response["refusal"], "refused")
 
     def test_max_tokens_stop_reason(self):
         mock_response = self._make_text_response(stop_reason="max_tokens")
-        self.mock_client.messages.create.return_value = mock_response
+        _stub_stream(self.mock_client, mock_response)
 
         response = self.wrapper.chat(messages=[{"role": "user", "content": "Hi"}])
         self.assertEqual(response["error_type"], errors.LENGTH)
@@ -509,32 +519,32 @@ class TestAnthropicWrapperStructuredOutputsAndOptions(unittest.TestCase):
         self.assertFalse(response["done"])
 
     def test_tool_choice_none_mapping(self):
-        self.mock_client.messages.create.return_value = self._make_text_response()
+        _stub_stream(self.mock_client, self._make_text_response())
 
         self.wrapper.chat(
             messages=[{"role": "user", "content": "Hi"}], tool_choice="none"
         )
-        call_kwargs = self.mock_client.messages.create.call_args[1]
+        call_kwargs = self.mock_client.messages.stream.call_args[1]
         self.assertEqual(call_kwargs["tool_choice"], {"type": "none"})
 
     def test_tool_choice_auto_mapping(self):
-        self.mock_client.messages.create.return_value = self._make_text_response()
+        _stub_stream(self.mock_client, self._make_text_response())
 
         self.wrapper.chat(
             messages=[{"role": "user", "content": "Hi"}], tool_choice="auto"
         )
-        call_kwargs = self.mock_client.messages.create.call_args[1]
+        call_kwargs = self.mock_client.messages.stream.call_args[1]
         self.assertEqual(call_kwargs["tool_choice"], {"type": "auto"})
 
     def test_tool_choice_dict_passthrough(self):
-        self.mock_client.messages.create.return_value = self._make_text_response()
+        _stub_stream(self.mock_client, self._make_text_response())
 
         explicit_choice = {"type": "tool", "name": "get_weather"}
         self.wrapper.chat(
             messages=[{"role": "user", "content": "Hi"}],
             tool_choice=explicit_choice,
         )
-        call_kwargs = self.mock_client.messages.create.call_args[1]
+        call_kwargs = self.mock_client.messages.stream.call_args[1]
         self.assertEqual(call_kwargs["tool_choice"], explicit_choice)
 
     def test_thinking_and_effort_forwarded_without_temperature(self):
@@ -542,32 +552,32 @@ class TestAnthropicWrapperStructuredOutputsAndOptions(unittest.TestCase):
             api_key=self.api_key, thinking={"type": "adaptive"}, effort="high"
         )
         wrapper.client = self.mock_client
-        self.mock_client.messages.create.return_value = self._make_text_response()
+        _stub_stream(self.mock_client, self._make_text_response())
 
         wrapper.chat(
             messages=[{"role": "user", "content": "Hi"}],
             options={"temperature": 0.9},
         )
 
-        call_kwargs = self.mock_client.messages.create.call_args[1]
+        call_kwargs = self.mock_client.messages.stream.call_args[1]
         self.assertEqual(call_kwargs["thinking"], {"type": "adaptive"})
         self.assertEqual(call_kwargs["output_config"], {"effort": "high"})
         # Current models reject temperature when adaptive thinking is on.
         self.assertNotIn("temperature", call_kwargs)
 
     def test_temperature_sent_when_thinking_not_configured(self):
-        self.mock_client.messages.create.return_value = self._make_text_response()
+        _stub_stream(self.mock_client, self._make_text_response())
 
         self.wrapper.chat(
             messages=[{"role": "user", "content": "Hi"}],
             options={"temperature": 0.5},
         )
-        call_kwargs = self.mock_client.messages.create.call_args[1]
+        call_kwargs = self.mock_client.messages.stream.call_args[1]
         self.assertEqual(call_kwargs["temperature"], 0.5)
 
     def test_cache_read_input_tokens_none_guarded(self):
         mock_response = self._make_text_response(cache_read=None)
-        self.mock_client.messages.create.return_value = mock_response
+        _stub_stream(self.mock_client, mock_response)
 
         response = self.wrapper.chat(messages=[{"role": "user", "content": "Hi"}])
         self.assertEqual(response["usage"]["cached_tokens"], 0)

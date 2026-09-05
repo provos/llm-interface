@@ -217,9 +217,8 @@ class AnthropicWrapper:
         """
         Args:
             api_key (str): Anthropic API key.
-            max_tokens (int): Default max_tokens for requests. Values above ~16k
-                should use streaming to avoid HTTP timeouts; this wrapper does not
-                stream yet (future work).
+            max_tokens (int): Default max_tokens for requests. Requests always
+                stream, so large values are safe.
             timeout (float): Request timeout in seconds.
             prompt_caching (bool): When True (the default), every request carries
                 top-level `cache_control={"type": "ephemeral"}`, which auto-caches
@@ -255,9 +254,9 @@ class AnthropicWrapper:
                 - model (str): The Anthropic model to use.
                 - max_tokens (int): Overrides the instance's max_tokens.
                 - options (dict): May contain "temperature".
-                - response_schema (Type[BaseModel]): When provided, uses
-                  `client.messages.parse(...)` for structured output instead of
-                  `client.messages.create(...)`.
+                - response_schema (Type[BaseModel]): When provided, it is passed as
+                  `output_format` so the streamed final message carries a validated
+                  `parsed_output`.
                 - tool_choice (str | dict): "none" -> {"type": "none"},
                   "auto" -> {"type": "auto"}, or a dict passed through as-is.
 
@@ -321,22 +320,20 @@ class AnthropicWrapper:
 
         response_schema = kwargs.get("response_schema")
 
+        # Every request streams: `messages.stream` accepts `output_format`
+        # (structured output, validated into `parsed_output`) together with
+        # `cache_control`, and streaming avoids the SDK's timeout guard on
+        # large `max_tokens` values.
+        if response_schema is not None:
+            params["output_format"] = response_schema
+        if self.prompt_caching:
+            # Auto-caches the last cacheable block - what a growing
+            # tool-call transcript wants.
+            params["cache_control"] = {"type": "ephemeral"}
+
         try:
-            if response_schema is not None:
-                # `client.messages.parse` (anthropic 1.4.0) validates the
-                # response against `output_format`. Note it does not accept
-                # `cache_control`, unlike `messages.create`.
-                response = self.client.messages.parse(
-                    output_format=response_schema, **params
-                )
-            else:
-                create_params = dict(params)
-                if self.prompt_caching:
-                    # Auto-caches the last cacheable block - what a growing
-                    # tool-call transcript wants. `max_tokens` above ~16k
-                    # should use streaming instead of `create()` (future work).
-                    create_params["cache_control"] = {"type": "ephemeral"}
-                response = self.client.messages.create(**create_params)
+            with self.client.messages.stream(**params) as stream:
+                response = stream.get_final_message()
 
             # Extract usage information
             usage = response.usage
@@ -391,8 +388,8 @@ class AnthropicWrapper:
                 }
 
             if response_schema is not None:
-                # `messages.parse` attaches `parsed_output` to the response;
-                # `generate_pydantic` already accepts a BaseModel instance here.
+                # `output_format` makes the final message a ParsedMessage with
+                # `parsed_output`; `generate_pydantic` accepts a BaseModel here.
                 return {
                     "message": {"content": getattr(response, "parsed_output", None)},
                     "usage": usage_info,
