@@ -1485,3 +1485,54 @@ class TestLLMInterface(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRetryKeepsToolTranscript(unittest.TestCase):
+    """A validation retry must continue the conversation that included the tool work."""
+
+    def setUp(self):
+        self.mock_client = Mock(spec=Client)
+        self.llm = LLMInterface(
+            client=self.mock_client, support_structured_outputs=True
+        )
+        self.llm.disk_cache = MockCache()
+
+    def test_retry_continues_after_tool_calls(self):
+        tool_call_response = {
+            "message": {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "mock_tool",
+                            "arguments": {"param1": "a", "param2": 1},
+                        },
+                    }
+                ],
+            }
+        }
+        bad = {"message": {"content": '{"field1": "bad", "field2": 1}'}}
+        good = {"message": {"content": '{"field1": "good", "field2": 2}'}}
+        self.mock_client.chat.side_effect = [tool_call_response, bad, good]
+
+        def validate(obj):
+            return None if obj.field1 == "good" else "field1 must be good"
+
+        result = self.llm.generate_pydantic(
+            prompt_template="do it",
+            output_schema=DummyPydanticModel,
+            tools=[mock_function],
+            extra_validation=validate,
+        )
+
+        self.assertEqual(result.field1, "good")
+        self.assertEqual(self.mock_client.chat.call_count, 3)
+        retry_messages = self.mock_client.chat.call_args_list[2][1]["messages"]
+        roles = [m["role"] for m in retry_messages]
+        # system, user, assistant(tool call), tool result, assistant(bad), user(try again)
+        self.assertIn("tool", roles)
+        self.assertEqual(roles[-1], "user")
+        self.assertIn("Try again", retry_messages[-1]["content"])
+        self.assertIn("field1 must be good", retry_messages[-1]["content"])

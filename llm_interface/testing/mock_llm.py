@@ -65,6 +65,7 @@ class MockLLM(LLMInterface):
         allow_json_mode: bool = True,
         max_tool_rounds: Optional[int] = None,
         cache_salt: Optional[str] = None,
+        transcript=None,
     ) -> str:
         # Reconstruct the full prompt from messages
         full_prompt = ""

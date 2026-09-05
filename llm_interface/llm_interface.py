@@ -404,6 +404,7 @@ class LLMInterface:
         allow_json_mode: bool = True,
         max_tool_rounds: Optional[int] = None,
         cache_salt: Optional[str] = None,
+        transcript: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Execute a chat conversation with caching and optional tool execution.
 
@@ -423,6 +424,11 @@ class LLMInterface:
                 ``self.max_tool_rounds`` when None.
             cache_salt (Optional[str]): Optional value mixed into the cache key so callers
                 whose tools read external state can invalidate the response cache.
+            transcript (Optional[List[Dict[str, Any]]]): When a list is given, it is
+                filled with the full conversation as sent on the last request (the
+                initial messages plus every tool call and tool result), excluding the
+                final assistant answer, so a caller can continue the conversation
+                without repeating the tool work. Left empty on a cache hit.
 
         Returns:
             str: The content of the chat response message
@@ -554,6 +560,10 @@ class LLMInterface:
 
                 self.logger.info("Chatting with messages: %s", current_messages)
 
+            if transcript is not None:
+                transcript.clear()
+                transcript.extend(current_messages)
+
             # Cache the response with hashed prompt as key
             try:
                 self.disk_cache.set(prompt_hash, response)
@@ -579,6 +589,7 @@ class LLMInterface:
         allow_json_mode: bool = True,
         max_tool_rounds: Optional[int] = None,
         cache_salt: Optional[str] = None,
+        transcript: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
         Sends a chat request to the LLM and returns the response.
@@ -619,6 +630,7 @@ class LLMInterface:
             allow_json_mode=allow_json_mode,
             max_tool_rounds=max_tool_rounds,
             cache_salt=cache_salt,
+            transcript=transcript,
         )
         self.logger.info(
             "Received chat response: %s...",
@@ -727,6 +739,9 @@ class LLMInterface:
         while iteration < 3:
             iteration += 1
 
+            # A retry continues the conversation that produced the bad answer,
+            # tool calls and results included, so the model keeps what it read.
+            transcript: List[Dict[str, Any]] = []
             try:
                 raw_response = self.chat(
                     messages=messages,
@@ -736,18 +751,17 @@ class LLMInterface:
                     token_usage=token_usage,
                     max_tool_rounds=max_tool_rounds,
                     cache_salt=cache_salt,
+                    transcript=transcript,
                 )
             except ModelError as e:
                 raw_response = None
-                messages.extend(
-                    [
-                        {"role": "assistant", "content": str(e)},
-                        {
-                            "role": "user",
-                            "content": "Try again while avoiding the previous error.",
-                        },
-                    ]
-                )
+                messages = (transcript or messages) + [
+                    {"role": "assistant", "content": str(e)},
+                    {
+                        "role": "user",
+                        "content": "Try again while avoiding the previous error.",
+                    },
+                ]
                 continue
 
             if self.support_structured_outputs:
@@ -773,15 +787,13 @@ class LLMInterface:
                 error_message, response = self._parse_response(raw_response, parser)
 
             if response is None:
-                messages.extend(
-                    [
-                        {"role": "assistant", "content": raw_response},
-                        {
-                            "role": "user",
-                            "content": f"Try again. Your previous response was invalid and led to this error message: {error_message}",
-                        },
-                    ]
-                )
+                messages = (transcript or messages) + [
+                    {"role": "assistant", "content": raw_response or ""},
+                    {
+                        "role": "user",
+                        "content": f"Try again. Your previous response was invalid and led to this error message: {error_message}",
+                    },
+                ]
                 continue
 
             if extra_validation:
@@ -794,15 +806,13 @@ class LLMInterface:
                         raise ValueError(
                             "The response should be a string if the model does not support structured outputs."
                         )
-                    messages.extend(
-                        [
-                            {"role": "assistant", "content": raw_response},
-                            {
-                                "role": "user",
-                                "content": f"Try again. Your previous response was invalid and led to this error message: {extra_error_message}",
-                            },
-                        ]
-                    )
+                    messages = (transcript or messages) + [
+                        {"role": "assistant", "content": raw_response},
+                        {
+                            "role": "user",
+                            "content": f"Try again. Your previous response was invalid and led to this error message: {extra_error_message}",
+                        },
+                    ]
                     continue
             break
 
