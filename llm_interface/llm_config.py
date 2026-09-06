@@ -36,12 +36,11 @@ def supports_structured_output(model_name: str) -> bool:
     # Check if this is a GPT model with version 5 or higher
     # This handles both base models and dated variants (e.g., gpt-5, gpt-5-mini, gpt-5-2025-01-01)
     if model_name.startswith("gpt-"):
-        # Extract the version number after "gpt-"
+        # Extract the major version after "gpt-" (gpt-5, gpt-5-mini, gpt-5.6-luna)
         parts = model_name[4:].split("-")
-        if parts and parts[0].isdigit():
-            version = int(parts[0])
-            if version >= 5:
-                return True
+        major = re.match(r"(\d+)(?:\.\d+)?$", parts[0]) if parts else None
+        if major and int(major.group(1)) >= 5:
+            return True
 
     # Models that always support structured outputs (no date requirements)
     base_models = {
@@ -119,8 +118,10 @@ def llm_from_config(
         structured_outputs (Optional[bool]): Whether to override structured output support. Defaults to None.
         thinking (Optional[Dict[str, Any]]): Extended thinking configuration forwarded to
             `AnthropicWrapper` (e.g. {"type": "adaptive"}). Only used by the "anthropic" provider.
-        effort (Optional[str]): Effort level (low|medium|high|xhigh|max) forwarded to
-            `AnthropicWrapper`. Only used by the "anthropic" provider.
+        effort (Optional[str]): Effort level forwarded to `AnthropicWrapper` as
+            `output_config.effort` (low|medium|high|xhigh|max) or to `OpenAIWrapper`
+            as `reasoning_effort` (none|low|medium|high|xhigh). Used by the
+            "anthropic" and "openai" providers.
         prompt_caching (bool): Whether `AnthropicWrapper` should send top-level `cache_control`.
             Defaults to True. Only used by the "anthropic" provider.
         max_tool_rounds (int): Maximum number of tool-call round-trips forwarded to
@@ -155,7 +156,10 @@ def llm_from_config(
             if api_key is None:
                 raise ValueError("OPENAI_API_KEY not found in environment variables")
             wrapper = OpenAIWrapper(
-                api_key=api_key, max_tokens=max_tokens, timeout=timeout
+                api_key=api_key,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                reasoning_effort=effort,
             )
 
             support_structured_outputs = supports_structured_output(model_name)

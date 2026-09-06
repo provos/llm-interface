@@ -165,9 +165,25 @@ def convert_openai_models_to_ollama_response(openai_models_data) -> ListResponse
 
 
 class OpenAIWrapper:
-    def __init__(self, api_key: str, max_tokens: int = 4096, timeout: float = 600.0):
+    def __init__(
+        self,
+        api_key: str,
+        max_tokens: int = 4096,
+        timeout: float = 600.0,
+        reasoning_effort: Optional[str] = None,
+    ):
+        """
+        Args:
+            api_key (str): OpenAI API key.
+            max_tokens (int): Default ``max_completion_tokens`` for requests.
+            timeout (float): Request timeout in seconds.
+            reasoning_effort (Optional[str]): Forwarded as ``reasoning_effort`` on
+                every request for reasoning models (e.g. "none", "low", "medium",
+                "high"). None leaves the model default.
+        """
         self.client = OpenAI(api_key=api_key, timeout=timeout)
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
 
     def list(self) -> ListResponse:
         return convert_openai_models_to_ollama_response(self.client.models.list())
@@ -235,6 +251,9 @@ class OpenAIWrapper:
         if kwargs.get("tool_choice") is not None:
             api_params["tool_choice"] = kwargs["tool_choice"]
 
+        if self.reasoning_effort is not None:
+            api_params["reasoning_effort"] = self.reasoning_effort
+
         logging.debug("API parameters: %s", api_params)
 
         try:
@@ -288,9 +307,13 @@ class OpenAIWrapper:
                 "done": response.choices[0].finish_reason == "stop",
             }
             if usage.prompt_tokens_details:
-                return_message["usage"][
-                    "cached_tokens"
-                ] = usage.prompt_tokens_details.cached_tokens
+                return_message["usage"]["cached_tokens"] = (
+                    usage.prompt_tokens_details.cached_tokens or 0
+                )
+            if usage.completion_tokens_details:
+                return_message["usage"]["reasoning_tokens"] = (
+                    usage.completion_tokens_details.reasoning_tokens or 0
+                )
             # Check for tool calls
             if message.tool_calls:
                 return_message["message"]["tool_calls"] = [
