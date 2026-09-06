@@ -46,7 +46,7 @@ class TestReasoningEffort(unittest.TestCase):
 
 
 class TestEffortRejectedWithTools(unittest.TestCase):
-    def test_retries_without_effort_and_remembers(self):
+    def test_retries_with_none_and_remembers(self):
         import httpx
         from openai import BadRequestError
 
@@ -54,7 +54,9 @@ class TestEffortRejectedWithTools(unittest.TestCase):
             wrapper = OpenAIWrapper(api_key="k", reasoning_effort="low")
         wrapper.client = MagicMock()
         rejection = BadRequestError(
-            "Function tools with reasoning_effort are not supported for gpt-5.6-luna",
+            "Function tools with reasoning_effort are not supported for gpt-5.6-luna "
+            "in /v1/chat/completions. To use function tools, use /v1/responses or "
+            "set reasoning_effort to 'none'.",
             response=httpx.Response(400, request=httpx.Request("POST", "https://x")),
             body=None,
         )
@@ -71,24 +73,43 @@ class TestEffortRejectedWithTools(unittest.TestCase):
         calls = wrapper.client.chat.completions.create.call_args_list
         self.assertEqual(len(calls), 2)
         self.assertEqual(calls[0].kwargs["reasoning_effort"], "low")
-        self.assertNotIn("reasoning_effort", calls[1].kwargs)
+        self.assertEqual(calls[1].kwargs["reasoning_effort"], "none")
 
-        # the next tool request skips the parameter up front
+        # the next tool request sends "none" up front
         wrapper.client.chat.completions.create.side_effect = [fake_response()]
         wrapper.chat(
             [{"role": "user", "content": "hi"}], tools=tools, model="gpt-5.6-luna"
         )
-        self.assertNotIn(
-            "reasoning_effort", wrapper.client.chat.completions.create.call_args.kwargs
+        self.assertEqual(
+            wrapper.client.chat.completions.create.call_args.kwargs["reasoning_effort"],
+            "none",
         )
 
-        # requests without tools keep it
+        # requests without tools keep the configured effort
         wrapper.client.chat.completions.create.side_effect = [fake_response()]
         wrapper.chat([{"role": "user", "content": "hi"}], model="gpt-5.6-luna")
         self.assertEqual(
             wrapper.client.chat.completions.create.call_args.kwargs["reasoning_effort"],
             "low",
         )
+
+    def test_a_rejection_with_none_already_set_propagates(self):
+        import httpx
+        from openai import BadRequestError
+
+        with patch("llm_interface.openai.OpenAI"):
+            wrapper = OpenAIWrapper(api_key="k", reasoning_effort="none")
+        wrapper.client = MagicMock()
+        wrapper.client.chat.completions.create.side_effect = BadRequestError(
+            "reasoning_effort not supported",
+            response=httpx.Response(400, request=httpx.Request("POST", "https://x")),
+            body=None,
+        )
+        tools = [{"type": "function", "function": {"name": "ping", "parameters": {}}}]
+        with self.assertRaises(BadRequestError):
+            wrapper.chat(
+                [{"role": "user", "content": "hi"}], tools=tools, model="gpt-5.6-luna"
+            )
 
 
 class TestStructuredOutputWithNonStrictTools(unittest.TestCase):

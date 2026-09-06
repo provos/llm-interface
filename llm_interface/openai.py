@@ -200,8 +200,8 @@ class OpenAIWrapper:
         self.client = OpenAI(api_key=api_key, timeout=timeout)
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
-        # some models (gpt-5.6-luna on chat completions) reject reasoning_effort
-        # together with function tools; remembered after the first rejection
+        # some models (gpt-5.6-luna on chat completions) only accept function
+        # tools with reasoning_effort "none"; remembered after the first rejection
         self._effort_rejected_with_tools = False
 
     def list(self) -> ListResponse:
@@ -316,9 +316,9 @@ class OpenAIWrapper:
         if kwargs.get("tool_choice") is not None:
             api_params["tool_choice"] = kwargs["tool_choice"]
 
-        if self.reasoning_effort is not None and not (
-            tools and self._effort_rejected_with_tools
-        ):
+        if tools and self._effort_rejected_with_tools:
+            api_params["reasoning_effort"] = "none"
+        elif self.reasoning_effort is not None:
             api_params["reasoning_effort"] = self.reasoning_effort
 
         logging.debug("API parameters: %s", api_params)
@@ -329,17 +329,21 @@ class OpenAIWrapper:
             except BadRequestError as e:
                 message_text = str(e)
                 if (
-                    "reasoning_effort" in api_params
+                    tools
                     and "reasoning_effort" in message_text
                     and "not supported" in message_text
+                    and api_params.get("reasoning_effort") != "none"
                 ):
+                    # e.g. "Function tools with reasoning_effort are not supported
+                    # for gpt-5.6-luna in /v1/chat/completions. To use function
+                    # tools, use /v1/responses or set reasoning_effort to 'none'."
                     logging.warning(
-                        "%s rejected reasoning_effort for this request; retrying without it",
+                        "%s only accepts function tools with reasoning_effort "
+                        "'none' on chat completions; retrying that way",
                         api_params["model"],
                     )
-                    if tools:
-                        self._effort_rejected_with_tools = True
-                    api_params.pop("reasoning_effort")
+                    self._effort_rejected_with_tools = True
+                    api_params["reasoning_effort"] = "none"
                     completed = self._complete(api_params, tools, kwargs)
                 else:
                     raise
