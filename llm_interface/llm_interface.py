@@ -47,6 +47,10 @@ class ModelError(Exception):
     pass
 
 
+# seconds to wait (times the attempt number) after a provider rate limit
+RATE_LIMIT_RETRY_DELAY = 15.0
+
+
 class LLMInterface:
     """
     A unified interface for interacting with various Language Learning Models (LLMs).
@@ -354,25 +358,24 @@ class LLMInterface:
 
             self.logger.info("Received chat response: %s", response)
 
-            # Check for timeout error
-            if (
-                "error" in response
-                and "error_type" in response
-                and (
-                    response.get("error_type") == errors.TIMEOUT
-                    or response.get("error_type") == errors.CONNECTION
-                )
-            ):
+            # Check for a transient error: timeouts, connection problems and
+            # rate limits are retried with a growing delay
+            error_type = response.get("error_type") if "error" in response else None
+            if error_type in (errors.TIMEOUT, errors.CONNECTION, errors.RATE_LIMIT):
                 retry_count += 1
                 if retry_count <= self.max_retries:
+                    delay = self.retry_delay * retry_count
+                    if error_type == errors.RATE_LIMIT:
+                        # per-minute token limits need real time to clear
+                        delay = max(delay, RATE_LIMIT_RETRY_DELAY * retry_count)
                     self.logger.warning(
                         "Request error (%s). Retrying (%d/%d) after %.1f seconds...",
                         response["error"],
                         retry_count,
                         self.max_retries,
-                        self.retry_delay * retry_count,
+                        delay,
                     )
-                    time.sleep(self.retry_delay * retry_count)
+                    time.sleep(delay)
                     continue
                 else:
                     self.logger.error(

@@ -26,7 +26,13 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from ollama import ListResponse
-from openai import APIConnectionError, APITimeoutError, OpenAI, pydantic_function_tool
+from openai import (
+    APIConnectionError,
+    APITimeoutError,
+    OpenAI,
+    RateLimitError,
+    pydantic_function_tool,
+)
 
 from . import errors
 from .openai import convert_openai_models_to_ollama_response
@@ -234,6 +240,14 @@ class OpenAIResponsesWrapper:
             return {
                 "error": "Request timed out.",
                 "error_type": errors.TIMEOUT,
+                "content": None,
+                "done": False,
+                "usage": None,
+            }
+        except RateLimitError as e:
+            return {
+                "error": f"Rate limited: {e}",
+                "error_type": errors.RATE_LIMIT,
                 "content": None,
                 "done": False,
                 "usage": None,

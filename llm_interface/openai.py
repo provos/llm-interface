@@ -24,6 +24,7 @@ from openai import (
     ContentFilterFinishReasonError,
     LengthFinishReasonError,
     OpenAI,
+    RateLimitError,
 )
 
 from . import errors
@@ -413,6 +414,14 @@ class OpenAIWrapper:
             return {
                 "error": "Content was rejected by the content filter.",
                 "error_type": errors.CONTENT_FILTER,
+                "content": None,
+                "done": False,
+                "usage": None,
+            }
+        except RateLimitError as e:
+            return {
+                "error": f"Rate limited: {e}",
+                "error_type": errors.RATE_LIMIT,
                 "content": None,
                 "done": False,
                 "usage": None,
