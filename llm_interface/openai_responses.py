@@ -107,6 +107,12 @@ def translate_messages_for_responses(
             if msg.get("content"):
                 items.append({"role": "assistant", "content": msg["content"]})
             for tool_call in msg["tool_calls"]:
+                call_id = tool_call.get("id")
+                if not call_id:
+                    raise ValueError(
+                        "An assistant tool call must carry the id its result "
+                        f"answers; got {tool_call!r}"
+                    )
                 function = tool_call.get("function", tool_call)
                 arguments = function.get("arguments", {})
                 if not isinstance(arguments, str):
@@ -114,7 +120,7 @@ def translate_messages_for_responses(
                 items.append(
                     {
                         "type": "function_call",
-                        "call_id": tool_call.get("id", ""),
+                        "call_id": call_id,
                         "name": function["name"],
                         "arguments": arguments,
                     }

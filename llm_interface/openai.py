@@ -14,7 +14,7 @@
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from ollama import ListResponse
 from openai import pydantic_function_tool
@@ -201,9 +201,9 @@ class OpenAIWrapper:
         self.client = OpenAI(api_key=api_key, timeout=timeout)
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
-        # some models (gpt-5.6-luna on chat completions) only accept function
-        # tools with reasoning_effort "none"; remembered after the first rejection
-        self._effort_rejected_with_tools = False
+        # models (gpt-5.6-luna on chat completions) that only accept function
+        # tools with reasoning_effort "none"; filled in after the first rejection
+        self._effort_rejected_with_tools: Set[str] = set()
 
     def list(self) -> ListResponse:
         return convert_openai_models_to_ollama_response(self.client.models.list())
@@ -317,7 +317,7 @@ class OpenAIWrapper:
         if kwargs.get("tool_choice") is not None:
             api_params["tool_choice"] = kwargs["tool_choice"]
 
-        if tools and self._effort_rejected_with_tools:
+        if tools and api_params["model"] in self._effort_rejected_with_tools:
             api_params["reasoning_effort"] = "none"
         elif self.reasoning_effort is not None:
             api_params["reasoning_effort"] = self.reasoning_effort
@@ -343,7 +343,7 @@ class OpenAIWrapper:
                         "'none' on chat completions; retrying that way",
                         api_params["model"],
                     )
-                    self._effort_rejected_with_tools = True
+                    self._effort_rejected_with_tools.add(api_params["model"])
                     api_params["reasoning_effort"] = "none"
                     completed = self._complete(api_params, tools, kwargs)
                 else:

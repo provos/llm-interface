@@ -129,6 +129,18 @@ class TestTranslation(unittest.TestCase):
         with self.assertRaises(ValueError):
             translate_messages_for_responses([{"role": "tool", "content": "x"}])
 
+    def test_assistant_tool_call_without_id_fails_fast(self):
+        with self.assertRaises(ValueError):
+            translate_messages_for_responses(
+                [
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [{"function": {"name": "f", "arguments": {}}}],
+                    }
+                ]
+            )
+
 
 class TestChat(unittest.TestCase):
     def setUp(self):

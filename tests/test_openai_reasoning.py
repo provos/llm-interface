@@ -93,6 +93,14 @@ class TestEffortRejectedWithTools(unittest.TestCase):
             "low",
         )
 
+        # the rejection is remembered per model: another model still gets the effort
+        wrapper.client.chat.completions.create.side_effect = [fake_response()]
+        wrapper.chat([{"role": "user", "content": "hi"}], tools=tools, model="gpt-5")
+        self.assertEqual(
+            wrapper.client.chat.completions.create.call_args.kwargs["reasoning_effort"],
+            "low",
+        )
+
     def test_a_rejection_with_none_already_set_propagates(self):
         import httpx
         from openai import BadRequestError
