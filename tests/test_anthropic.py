@@ -86,6 +86,7 @@ class TestAnthropicWrapper(unittest.TestCase):
         mock_response.usage.input_tokens = 10
         mock_response.usage.output_tokens = 5
         mock_response.usage.cache_read_input_tokens = 0
+        mock_response.usage.cache_creation_input_tokens = 0
 
         _stub_stream(self.mock_client, mock_response)
 
@@ -112,7 +113,32 @@ class TestAnthropicWrapper(unittest.TestCase):
         self.assertEqual(response["usage"]["prompt_tokens"], 10)
         self.assertEqual(response["usage"]["completion_tokens"], 5)
         self.assertEqual(response["usage"]["total_tokens"], 15)
+        self.assertEqual(response["usage"]["cache_creation_tokens"], 0)
+        self.assertEqual(response["usage"]["reasoning_tokens"], 0)
         self.assertTrue(response["done"])
+
+    def test_chat_reports_cache_writes_and_estimates_thinking(self):
+        mock_response = MagicMock()
+        mock_response.content = [
+            MagicMock(type="thinking", thinking="(summarized)"),
+            MagicMock(type="text", text="x" * 400),
+        ]
+        mock_response.stop_reason = "end_turn"
+        mock_response.usage.input_tokens = 10
+        mock_response.usage.output_tokens = 1000
+        mock_response.usage.cache_read_input_tokens = 5000
+        mock_response.usage.cache_creation_input_tokens = 700
+
+        _stub_stream(self.mock_client, mock_response)
+
+        response = self.anthropic_wrapper.chat(
+            [{"role": "user", "content": "hi"}], model="claude-sonnet-5"
+        )
+
+        self.assertEqual(response["usage"]["cached_tokens"], 5000)
+        self.assertEqual(response["usage"]["cache_creation_tokens"], 700)
+        # 1000 output tokens, 400 chars (~100 tokens) visible: ~900 thinking
+        self.assertEqual(response["usage"]["reasoning_tokens"], 900)
 
     def test_chat_with_tools(self):
         # Set up mock response with tool use
@@ -128,6 +154,7 @@ class TestAnthropicWrapper(unittest.TestCase):
         mock_response.usage.input_tokens = 15
         mock_response.usage.output_tokens = 10
         mock_response.usage.cache_read_input_tokens = 0
+        mock_response.usage.cache_creation_input_tokens = 0
 
         _stub_stream(self.mock_client, mock_response)
 
@@ -178,6 +205,7 @@ class TestAnthropicWrapper(unittest.TestCase):
         mock_response.usage.input_tokens = 20
         mock_response.usage.output_tokens = 8
         mock_response.usage.cache_read_input_tokens = 0
+        mock_response.usage.cache_creation_input_tokens = 0
 
         _stub_stream(self.mock_client, mock_response)
 
@@ -230,6 +258,7 @@ class TestAnthropicWrapper(unittest.TestCase):
         mock_response.usage.input_tokens = 30
         mock_response.usage.output_tokens = 7
         mock_response.usage.cache_read_input_tokens = 0
+        mock_response.usage.cache_creation_input_tokens = 0
 
         _stub_stream(self.mock_client, mock_response)
 
@@ -452,6 +481,7 @@ class TestAnthropicWrapperStructuredOutputsAndOptions(unittest.TestCase):
         mock_response.usage.input_tokens = 10
         mock_response.usage.output_tokens = 5
         mock_response.usage.cache_read_input_tokens = 0
+        mock_response.usage.cache_creation_input_tokens = 0
         mock_response.parsed_output = Person(name="Alice")
 
         _stub_stream(self.mock_client, mock_response)

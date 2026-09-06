@@ -214,6 +214,32 @@ def convert_anthropic_models_to_ollama_response(
     return ListResponse(models=ollama_models)
 
 
+def _usage_int(value: Any) -> int:
+    """Usage counters that the SDK may leave unset (or that tests mock) become 0."""
+    return value if isinstance(value, int) else 0
+
+
+def _estimate_thinking_tokens(response: Any) -> int:
+    """Thinking tokens are billed as output but the API does not count them
+    separately. When the response carries thinking blocks, estimate them as the
+    output tokens that the visible text and tool-call blocks do not account for."""
+    blocks = list(getattr(response, "content", None) or [])
+    if not any(getattr(block, "type", None) == "thinking" for block in blocks):
+        return 0
+    visible_chars = 0
+    for block in blocks:
+        block_type = getattr(block, "type", None)
+        if block_type == "text":
+            visible_chars += len(getattr(block, "text", "") or "")
+        elif block_type == "tool_use":
+            try:
+                visible_chars += len(json.dumps(getattr(block, "input", None)))
+            except (TypeError, ValueError):
+                pass
+    output_tokens = _usage_int(getattr(response.usage, "output_tokens", 0))
+    return max(0, output_tokens - visible_chars // 4)
+
+
 class AnthropicWrapper:
     def __init__(
         self,
@@ -351,7 +377,11 @@ class AnthropicWrapper:
                 "prompt_tokens": usage.input_tokens,
                 "completion_tokens": usage.output_tokens,
                 "cached_tokens": usage.cache_read_input_tokens or 0,
+                "cache_creation_tokens": _usage_int(
+                    getattr(usage, "cache_creation_input_tokens", 0)
+                ),
                 "total_tokens": usage.input_tokens + usage.output_tokens,
+                "reasoning_tokens": _estimate_thinking_tokens(response),
             }
 
             if response.stop_reason == "refusal":
