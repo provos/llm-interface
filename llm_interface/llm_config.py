@@ -7,6 +7,7 @@ from .anthropic import AnthropicWrapper
 from .gemini import GeminiWrapper
 from .llm_interface import LLMInterface
 from .openai import OpenAIWrapper
+from .openai_responses import OpenAIResponsesWrapper
 from .openrouter import OpenRouterWrapper
 from .remote_ollama import RemoteOllama
 from .ssh import SSHConnection
@@ -96,6 +97,7 @@ def llm_from_config(
     effort: Optional[str] = None,
     prompt_caching: bool = True,
     max_tool_rounds: int = 5,
+    openai_api: Literal["responses", "chat"] = "responses",
 ) -> LLMInterface:
     """
     Creates and configures a language model interface based on specified provider and parameters.
@@ -126,6 +128,9 @@ def llm_from_config(
             Defaults to True. Only used by the "anthropic" provider.
         max_tool_rounds (int): Maximum number of tool-call round-trips forwarded to
             `LLMInterface`. Defaults to 5. Used by the "openai" and "anthropic" providers.
+        openai_api (Literal["responses", "chat"]): Which OpenAI API the "openai"
+            provider talks to. "responses" (the default) supports reasoning
+            together with function tools; "chat" is the Chat Completions API.
 
     Returns:
         LLMInterface: Configured interface for interacting with the specified LLM.
@@ -155,7 +160,10 @@ def llm_from_config(
             api_key = os.getenv("OPENAI_API_KEY")
             if api_key is None:
                 raise ValueError("OPENAI_API_KEY not found in environment variables")
-            wrapper = OpenAIWrapper(
+            wrapper_class = (
+                OpenAIResponsesWrapper if openai_api == "responses" else OpenAIWrapper
+            )
+            wrapper = wrapper_class(
                 api_key=api_key,
                 max_tokens=max_tokens,
                 timeout=timeout,
