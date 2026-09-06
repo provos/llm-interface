@@ -106,12 +106,13 @@ class TestLLMConfig(unittest.TestCase):
             llm_openai_o1_mini.support_json_mode
         )  # Explicitly set to False in llm_config
 
-        # Anthropic - No JSON nor structured outputs in LLMInterface
+        # Anthropic - supports both JSON mode and structured outputs via
+        # client.messages.parse (AnthropicWrapper)
         llm_anthropic = llm_from_config(
             provider="anthropic", model_name="claude-3-opus-20240229"
         )
-        self.assertFalse(llm_anthropic.support_json_mode)
-        self.assertFalse(llm_anthropic.support_structured_outputs)
+        self.assertTrue(llm_anthropic.support_json_mode)
+        self.assertTrue(llm_anthropic.support_structured_outputs)
 
         # Gemini - Supports JSON, Supports Structured
         llm_gemini = llm_from_config(provider="gemini", model_name="gemini-pro")

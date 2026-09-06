@@ -1,8 +1,16 @@
 import inspect
 import re
+import types
+import typing
 from dataclasses import dataclass, field
 from textwrap import dedent
-from typing import Any, Callable, Dict, List, Optional, get_type_hints
+from typing import Any, Callable, Dict, List, Literal, Optional, get_type_hints
+
+# typing.Union and (on 3.10+) the `X | None` shorthand both need to be
+# recognized as "optional" wrappers when building JSON schemas.
+_UNION_ORIGINS = (typing.Union,)
+if hasattr(types, "UnionType"):  # pragma: no branch - always true on Python >= 3.10
+    _UNION_ORIGINS = _UNION_ORIGINS + (types.UnionType,)
 
 
 @dataclass
@@ -11,17 +19,20 @@ class Tool:
     description: str
     parameters: Dict[str, Any]
     func: Callable[..., Any] = field(repr=False)
+    strict: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert the tool to a dictionary format compatible with Ollama."""
+        function: Dict[str, Any] = {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+        }
+        if self.strict:
+            function["strict"] = True
         return {
             "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters,
-                "strict": True,
-            },
+            "function": function,
         }
 
     def execute(self, **kwargs: Dict[str, Any]) -> Any:
@@ -30,6 +41,41 @@ class Tool:
 
 def _type_to_json_schema(type_hint: Any) -> Dict[str, Any]:
     """Convert Python type hints to JSON Schema types."""
+    origin = typing.get_origin(type_hint)
+
+    # Literal["a", "b", ...] -> {"type": <inferred>, "enum": [...]}
+    if origin is Literal:
+        values = typing.get_args(type_hint)
+        value_types = {type(v) for v in values}
+        if value_types == {bool}:
+            inferred_type = "boolean"
+        elif value_types == {int}:
+            inferred_type = "integer"
+        elif value_types and value_types <= {int, float}:
+            inferred_type = "number"
+        elif value_types == {str}:
+            inferred_type = "string"
+        else:
+            inferred_type = "string"
+        return {"type": inferred_type, "enum": list(values)}
+
+    # Optional[X] / Union[X, None] / X | None -> the schema for X; wider unions -> anyOf
+    if origin in _UNION_ORIGINS:
+        non_none_args = [
+            arg for arg in typing.get_args(type_hint) if arg is not type(None)
+        ]
+        if len(non_none_args) == 1:
+            return _type_to_json_schema(non_none_args[0])
+        elif non_none_args:
+            # Union[A, B] / A | B: every member is acceptable
+            schemas = []
+            for arg in non_none_args:
+                schema = _type_to_json_schema(arg)
+                if schema not in schemas:
+                    schemas.append(schema)
+            return schemas[0] if len(schemas) == 1 else {"anyOf": schemas}
+        return {"type": "string"}
+
     if type_hint == str:
         return {"type": "string"}
     elif type_hint == int:
@@ -38,15 +84,14 @@ def _type_to_json_schema(type_hint: Any) -> Dict[str, Any]:
         return {"type": "number"}
     elif type_hint == bool:
         return {"type": "boolean"}
-    elif type_hint == list or getattr(type_hint, "__origin__", None) == list:
+    elif type_hint == list or origin == list:
         item_type = Any
-        if hasattr(type_hint, "__args__"):
-            item_type = type_hint.__args__[0]
+        args = typing.get_args(type_hint)
+        if args:
+            item_type = args[0]
         return {"type": "array", "items": _type_to_json_schema(item_type)}
-    elif type_hint == dict or getattr(type_hint, "__origin__", None) == dict:
+    elif type_hint == dict or origin == dict:
         return {"type": "object"}
-    elif hasattr(type_hint, "__origin__") and type_hint.__origin__ == Optional:
-        return _type_to_json_schema(type_hint.__args__[0])
     else:
         return {"type": "string"}
 
@@ -188,7 +233,17 @@ def create_tool(
 
         parameters["properties"][param_name] = param_schema
 
-    return Tool(name=func_name, description=func_desc, parameters=parameters, func=func)
+    # OpenAI strict mode rejects schemas with optional properties, so only
+    # enable it automatically when every parameter is required (no defaults).
+    is_strict = len(parameters["required"]) == len(parameters["properties"])
+
+    return Tool(
+        name=func_name,
+        description=func_desc,
+        parameters=parameters,
+        func=func,
+        strict=is_strict,
+    )
 
 
 def tool(

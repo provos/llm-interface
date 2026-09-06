@@ -1206,6 +1206,349 @@ class TestLLMInterface(unittest.TestCase):
         call_args = self.mock_client.chat.call_args[1]
         self.assertNotIn("format", call_args)
 
+    def test_chat_with_multiple_tool_calls_in_one_turn(self):
+        """A single assistant turn with N tool_calls must produce ONE assistant
+        message carrying all N tool_calls, followed by one tool message per
+        call, in order (not N separate assistant/tool round trips)."""
+        mock_tool = mock_function
+
+        self.mock_client.chat.side_effect = [
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "mock_tool",
+                                "arguments": {"param1": "first", "param2": 1},
+                            },
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {
+                                "name": "mock_tool",
+                                "arguments": {"param1": "second", "param2": 2},
+                            },
+                        },
+                    ],
+                }
+            },
+            {"message": {"content": "Final response after parallel tool calls"}},
+        ]
+
+        response = self.llm_interface.chat(
+            messages=[{"role": "user", "content": "Use the mock tool twice at once"}],
+            tools=[mock_tool],
+        )
+
+        # Only 2 rounds: the parallel tool_calls are one turn, not two.
+        self.assertEqual(self.mock_client.chat.call_count, 2)
+        self.assertEqual(response, "Final response after parallel tool calls")
+
+        second_call_messages = self.mock_client.chat.call_args_list[1][1]["messages"]
+        # user + ONE assistant message (both tool_calls) + 2 tool result messages
+        self.assertEqual(len(second_call_messages), 4)
+        self.assertEqual(second_call_messages[0]["role"], "user")
+        self.assertEqual(second_call_messages[1]["role"], "assistant")
+        self.assertEqual(len(second_call_messages[1]["tool_calls"]), 2)
+        self.assertEqual(second_call_messages[2]["role"], "tool")
+        self.assertEqual(second_call_messages[2]["tool_call_id"], "call_1")
+        self.assertEqual(second_call_messages[3]["role"], "tool")
+        self.assertEqual(second_call_messages[3]["tool_call_id"], "call_2")
+
+    def test_chat_with_tool_execution_error_produces_error_tool_message(self):
+        @tool(name="mock_tool")
+        def error_execute(**kwargs) -> str:
+            raise Exception("Tool execution failed")
+
+        error_tool = error_execute
+
+        self.mock_client.chat.side_effect = [
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "mock_tool",
+                                "arguments": {"param1": "test", "param2": 42},
+                            },
+                        }
+                    ],
+                }
+            },
+            {"message": {"content": "Recovered after error"}},
+        ]
+
+        response = self.llm_interface.chat(
+            messages=[{"role": "user", "content": "Use the error tool"}],
+            tools=[error_tool],
+        )
+
+        # The failed tool call must not end the conversation - the loop
+        # continues and the model can recover.
+        self.assertEqual(response, "Recovered after error")
+        self.assertEqual(self.mock_client.chat.call_count, 2)
+
+        second_call_messages = self.mock_client.chat.call_args_list[1][1]["messages"]
+        tool_message = second_call_messages[2]
+        self.assertEqual(tool_message["role"], "tool")
+        self.assertTrue(tool_message["is_error"])
+        self.assertIn("Error:", tool_message["content"])
+        self.assertIn("Tool execution failed", tool_message["content"])
+
+    def test_chat_with_unknown_tool_produces_error_tool_message(self):
+        mock_tool = mock_function
+
+        self.mock_client.chat.side_effect = [
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "invalid_tool",
+                                "arguments": {"param1": "test", "param2": 42},
+                            },
+                        }
+                    ],
+                }
+            },
+            {"message": {"content": "Recovered after unknown tool"}},
+        ]
+
+        response = self.llm_interface.chat(
+            messages=[{"role": "user", "content": "Use an invalid tool"}],
+            tools=[mock_tool],
+        )
+
+        self.assertEqual(response, "Recovered after unknown tool")
+        self.assertEqual(self.mock_client.chat.call_count, 2)
+
+        second_call_messages = self.mock_client.chat.call_args_list[1][1]["messages"]
+        tool_message = second_call_messages[2]
+        self.assertTrue(tool_message["is_error"])
+        self.assertIn("not found", tool_message["content"])
+
+    def test_chat_tool_round_limit_forces_final_answer(self):
+        """When max_tool_rounds is reached and the model still wants to call
+        tools, one final request with tool_choice="none" must be made instead
+        of silently returning an empty response."""
+        mock_tool = mock_function
+        generic_mock_client = Mock()  # Not Client-spec'd: supports tool_choice
+        self.llm_interface.client = generic_mock_client
+        self.llm_interface.max_tool_rounds = 2
+
+        tool_call_response = {
+            "message": {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "mock_tool",
+                            "arguments": {"param1": "x", "param2": 1},
+                        },
+                    }
+                ],
+            }
+        }
+        final_response = {"message": {"content": "Here is my final answer"}}
+
+        generic_mock_client.chat.side_effect = [
+            tool_call_response,
+            tool_call_response,
+            final_response,
+        ]
+
+        response = self.llm_interface.chat(
+            messages=[{"role": "user", "content": "Keep using the tool"}],
+            tools=[mock_tool],
+        )
+
+        self.assertEqual(response, "Here is my final answer")
+        # 2 normal rounds (both hit the round limit) + 1 forced final call
+        self.assertEqual(generic_mock_client.chat.call_count, 3)
+
+        final_call_kwargs = generic_mock_client.chat.call_args_list[2][1]
+        self.assertEqual(final_call_kwargs["tool_choice"], "none")
+
+        final_call_messages = final_call_kwargs["messages"]
+        self.assertEqual(final_call_messages[-1]["role"], "user")
+        self.assertIn("tool-call limit", final_call_messages[-1]["content"])
+
+    def test_chat_max_tool_rounds_per_call_override(self):
+        """A per-call max_tool_rounds overrides the instance default."""
+        mock_tool = mock_function
+        generic_mock_client = Mock()
+        self.llm_interface.client = generic_mock_client
+        self.llm_interface.max_tool_rounds = 5  # instance default stays high
+
+        tool_call_response = {
+            "message": {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "mock_tool",
+                            "arguments": {"param1": "x", "param2": 1},
+                        },
+                    }
+                ],
+            }
+        }
+        final_response = {"message": {"content": "Forced final answer"}}
+
+        generic_mock_client.chat.side_effect = [tool_call_response, final_response]
+
+        response = self.llm_interface.chat(
+            messages=[{"role": "user", "content": "Use the tool"}],
+            tools=[mock_tool],
+            max_tool_rounds=1,
+        )
+
+        self.assertEqual(response, "Forced final answer")
+        # Only 1 normal round (the override) + 1 forced final call
+        self.assertEqual(generic_mock_client.chat.call_count, 2)
+        final_call_kwargs = generic_mock_client.chat.call_args_list[1][1]
+        self.assertEqual(final_call_kwargs["tool_choice"], "none")
+
+    def test_create_prompt_hash_with_cache_salt(self):
+        base_hash = self.llm_interface._create_prompt_hash(
+            model_name="model1",
+            message_content="test message",
+            tool_content="test tool",
+            temperature=0.7,
+        )
+        salted_hash = self.llm_interface._create_prompt_hash(
+            model_name="model1",
+            message_content="test message",
+            tool_content="test tool",
+            temperature=0.7,
+            cache_salt="v2",
+        )
+        # Adding a cache_salt must change the hash relative to no salt.
+        self.assertNotEqual(base_hash, salted_hash)
+
+        # The same salt must be deterministic.
+        salted_hash_again = self.llm_interface._create_prompt_hash(
+            model_name="model1",
+            message_content="test message",
+            tool_content="test tool",
+            temperature=0.7,
+            cache_salt="v2",
+        )
+        self.assertEqual(salted_hash, salted_hash_again)
+
+        # A different salt must change the hash again.
+        different_salt_hash = self.llm_interface._create_prompt_hash(
+            model_name="model1",
+            message_content="test message",
+            tool_content="test tool",
+            temperature=0.7,
+            cache_salt="v3",
+        )
+        self.assertNotEqual(salted_hash, different_salt_hash)
+
+    def test_chat_cache_salt_invalidates_cache(self):
+        """Callers whose tools read external state (e.g. files) can use
+        cache_salt to force a fresh API call for an otherwise-identical
+        conversation."""
+        self.mock_client.chat.side_effect = [
+            {"message": {"content": "Response A"}},
+            {"message": {"content": "Response B"}},
+        ]
+
+        response1 = self.llm_interface.chat(
+            messages=[{"role": "user", "content": "Read the file"}],
+            cache_salt="v1",
+        )
+        response2 = self.llm_interface.chat(
+            messages=[{"role": "user", "content": "Read the file"}],
+            cache_salt="v2",
+        )
+
+        self.assertEqual(response1, "Response A")
+        self.assertEqual(response2, "Response B")
+        self.assertEqual(self.mock_client.chat.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRetryKeepsToolTranscript(unittest.TestCase):
+    """A validation retry must continue the conversation that included the tool work."""
+
+    def setUp(self):
+        self.mock_client = Mock(spec=Client)
+        self.llm = LLMInterface(
+            client=self.mock_client, support_structured_outputs=True
+        )
+        self.llm.disk_cache = MockCache()
+
+    def test_retry_continues_after_tool_calls(self):
+        tool_call_response = {
+            "message": {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "mock_tool",
+                            "arguments": {"param1": "a", "param2": 1},
+                        },
+                    }
+                ],
+            }
+        }
+        bad = {"message": {"content": '{"field1": "bad", "field2": 1}'}}
+        good = {"message": {"content": '{"field1": "good", "field2": 2}'}}
+        self.mock_client.chat.side_effect = [tool_call_response, bad, good]
+
+        def validate(obj):
+            return None if obj.field1 == "good" else "field1 must be good"
+
+        result = self.llm.generate_pydantic(
+            prompt_template="do it",
+            output_schema=DummyPydanticModel,
+            tools=[mock_function],
+            extra_validation=validate,
+        )
+
+        self.assertEqual(result.field1, "good")
+        self.assertEqual(self.mock_client.chat.call_count, 3)
+        retry_messages = self.mock_client.chat.call_args_list[2][1]["messages"]
+        roles = [m["role"] for m in retry_messages]
+        # system, user, assistant(tool call), tool result, assistant(bad), user(try again)
+        self.assertIn("tool", roles)
+        self.assertEqual(roles[-1], "user")
+        self.assertIn("Try again", retry_messages[-1]["content"])
+        self.assertIn("field1 must be good", retry_messages[-1]["content"])
+
+
+class TestTemperatureZero(unittest.TestCase):
+    def setUp(self):
+        self.mock_client = Mock(spec=Client)
+        self.llm = LLMInterface(client=self.mock_client)
+        self.llm.disk_cache = MockCache()
+
+    def test_zero_temperature_is_forwarded_and_keyed_separately(self):
+        self.mock_client.chat.return_value = {"message": {"content": "hi"}}
+        self.llm.chat(messages=[{"role": "user", "content": "x"}], temperature=0.0)
+        kwargs = self.mock_client.chat.call_args[1]
+        self.assertEqual(kwargs["options"]["temperature"], 0.0)
+        with_zero = self.llm._create_prompt_hash("m", "c", "", temperature=0.0)
+        unset = self.llm._create_prompt_hash("m", "c", "", temperature=None)
+        self.assertNotEqual(with_zero, unset)

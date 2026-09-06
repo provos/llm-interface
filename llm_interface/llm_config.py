@@ -1,7 +1,7 @@
 import os
 import re
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from .anthropic import AnthropicWrapper
 from .gemini import GeminiWrapper
@@ -93,6 +93,10 @@ def llm_from_config(
     timeout: float = 600.0,
     json_mode: Optional[bool] = None,
     structured_outputs: Optional[bool] = None,
+    thinking: Optional[Dict[str, Any]] = None,
+    effort: Optional[str] = None,
+    prompt_caching: bool = True,
+    max_tool_rounds: int = 5,
 ) -> LLMInterface:
     """
     Creates and configures a language model interface based on specified provider and parameters.
@@ -113,6 +117,14 @@ def llm_from_config(
         timeout (float): Timeout in seconds for model requests. Defaults to 600.0.
         json_mode (Optional[bool]): Whether to override JSON mode support. Defaults to None.
         structured_outputs (Optional[bool]): Whether to override structured output support. Defaults to None.
+        thinking (Optional[Dict[str, Any]]): Extended thinking configuration forwarded to
+            `AnthropicWrapper` (e.g. {"type": "adaptive"}). Only used by the "anthropic" provider.
+        effort (Optional[str]): Effort level (low|medium|high|xhigh|max) forwarded to
+            `AnthropicWrapper`. Only used by the "anthropic" provider.
+        prompt_caching (bool): Whether `AnthropicWrapper` should send top-level `cache_control`.
+            Defaults to True. Only used by the "anthropic" provider.
+        max_tool_rounds (int): Maximum number of tool-call round-trips forwarded to
+            `LLMInterface`. Defaults to 5. Used by the "openai" and "anthropic" providers.
 
     Returns:
         LLMInterface: Configured interface for interacting with the specified LLM.
@@ -159,19 +171,31 @@ def llm_from_config(
                 support_system_prompt=support_system_prompt,
                 use_cache=use_cache,
                 timeout=timeout,
+                max_tool_rounds=max_tool_rounds,
             )
         case "anthropic":
             api_key = os.getenv("ANTHROPIC_API_KEY")
             if api_key is None:
                 raise ValueError("ANTHROPIC_API_KEY not found in environment variables")
-            wrapper = AnthropicWrapper(api_key=api_key, max_tokens=max_tokens)
+            wrapper = AnthropicWrapper(
+                api_key=api_key,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                prompt_caching=prompt_caching,
+                thinking=thinking,
+                effort=effort,
+            )
             llm = LLMInterface(
                 model_name=model_name,
                 log_dir=log_dir,
                 client=wrapper,
-                support_json_mode=False,
+                # Anthropic's structured-output path (client.messages.parse) and
+                # response_schema handling route through these flags.
+                support_json_mode=True,
+                support_structured_outputs=True,
                 use_cache=use_cache,
                 timeout=timeout,
+                max_tool_rounds=max_tool_rounds,
             )
         case "gemini":
             api_key = os.getenv("GEMINI_API_KEY")

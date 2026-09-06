@@ -18,6 +18,7 @@ from typing import Any, Callable
 import requests
 from ollama import Client
 
+from .ollama import strip_is_error
 from .utils import setup_logging
 
 logger = setup_logging(logs_prefix="remote_ollama", logger_name=__name__)
@@ -69,6 +70,10 @@ class RemoteOllama:
 
     def _wrap_with_reconnect(self, func: Callable) -> Callable:
         def wrapper(*args, **kwargs) -> Any:
+            if "messages" in kwargs:
+                # Strip the internal `is_error` marker (added by LLMInterface's
+                # tool loop) before forwarding messages to Ollama.
+                kwargs["messages"] = strip_is_error(kwargs["messages"])
             try:
                 return func(*args, **kwargs)
             except requests.RequestException as e:

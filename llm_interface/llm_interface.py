@@ -27,6 +27,7 @@ from . import errors
 from .llm_tool import Tool
 from .ollama import OllamaWrapper
 from .pydantic_output_parser import MinimalPydanticOutputParser
+from .remote_ollama import RemoteOllama
 from .token_usage import TokenUsage
 from .utils import setup_logging
 
@@ -68,6 +69,8 @@ class LLMInterface:
         timeout (float): Timeout in seconds for API requests.
         max_retries (int): Maximum number of retries for API requests.
         retry_delay (float): Delay in seconds between retries for API requests.
+        max_tool_rounds (int): Maximum number of tool-call round-trips allowed in a single
+            chat() call before a final answer is forced. Defaults to 5.
 
     Example:
         >>> llm = LLMInterface(
@@ -108,6 +111,7 @@ class LLMInterface:
         timeout: float = 600.0,
         max_retries: int = 3,
         retry_delay: float = 2.0,
+        max_tool_rounds: int = 5,
     ):
         self.model_name = model_name
         self.client = client if client else OllamaWrapper(host=host, timeout=timeout)
@@ -117,6 +121,7 @@ class LLMInterface:
         self.requires_thinking = requires_thinking
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.max_tool_rounds = max_tool_rounds
 
         self.logger = setup_logging(
             logs_dir=log_dir, logs_prefix="llm_interface", logger_name=__name__
@@ -174,55 +179,121 @@ class LLMInterface:
 
         return new_model
 
-    def _execute_tool(
-        self, tool_call: Dict[str, Any], tools: List[Tool]
-    ) -> List[Dict[str, str]]:
-        """Execute tool calls and format results for the conversation."""
-        tool_name = tool_call.get("name") or tool_call.get("function", {}).get("name")
-        arguments = tool_call.get("arguments") or tool_call.get("function", {}).get(
-            "arguments", {}
-        )
+    def _execute_tool_calls(
+        self, tool_calls: List[Dict[str, Any]], tools: List[Tool]
+    ) -> List[Dict[str, Any]]:
+        """Execute every tool call made in a single assistant turn, as one unit.
 
-        if isinstance(arguments, str):
-            # Parse JSON string if needed
-            try:
-                arguments = json.loads(arguments)
-            except json.JSONDecodeError:
-                self.logger.error("Failed to parse tool arguments: %s", arguments)
-                return []
+        Builds one assistant message carrying the full ``tool_calls`` list (each
+        entry ``{"id", "type": "function", "function": {"name", "arguments"}}``),
+        followed by one ``{"role": "tool", ...}`` message per call, in the same
+        order the calls were made. This keeps a multi-tool-call turn intact for
+        providers (like Anthropic) that require all `tool_result` blocks to be
+        returned together.
 
-        tool_map = {tool.name: tool for tool in tools}
-        if tool_name in tool_map:
-            try:
-                result = tool_map[tool_name].execute(**arguments)
-                return [
-                    {
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": [
-                            {
-                                "id": tool_call.get("id", ""),
-                                "type": "function",
-                                "function": {
-                                    "name": tool_name,
-                                    "arguments": arguments,  # Ollama requires this as a Dict but OpenAI requires it as a string
-                                },
-                            }
-                        ],
+        A tool call is never silently dropped: if the tool raises, is unknown, or
+        its arguments fail to parse as JSON, a tool message is still emitted with
+        content ``"Error: <message>"`` and an extra ``"is_error": True`` key, so
+        the conversation continues and the model gets a chance to recover.
+
+        Args:
+            tool_calls (List[Dict[str, Any]]): The tool calls from the assistant's response.
+            tools (List[Tool]): The tools available for execution.
+
+        Returns:
+            List[Dict[str, Any]]: ``[assistant_message, tool_message, ...]`` - one
+            assistant message followed by one tool message per call, in order.
+        """
+        tool_map = {t.name: t for t in tools} if tools else {}
+
+        assistant_tool_calls: List[Dict[str, Any]] = []
+        tool_messages: List[Dict[str, Any]] = []
+
+        for tool_call in tool_calls:
+            tool_name = tool_call.get("name") or tool_call.get("function", {}).get(
+                "name"
+            )
+            call_id = tool_call.get("id", "")
+            arguments = tool_call.get("arguments")
+            if arguments is None:
+                arguments = tool_call.get("function", {}).get("arguments", {})
+
+            parse_error = None
+            if isinstance(arguments, str):
+                # Parse JSON string if needed
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError as e:
+                    parse_error = f"Failed to parse tool arguments: {e}"
+                    self.logger.error(parse_error)
+
+            assistant_tool_calls.append(
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": arguments,  # Ollama requires this as a Dict but OpenAI requires it as a string
                     },
+                }
+            )
+
+            if parse_error is not None:
+                tool_messages.append(
                     {
                         "role": "tool",
                         "name": tool_name,
-                        "tool_call_id": tool_call.get("id", ""),
+                        "tool_call_id": call_id,
+                        "content": f"Error: {parse_error}",
+                        "is_error": True,
+                    }
+                )
+                continue
+
+            if tool_name not in tool_map:
+                error_message = f"Tool '{tool_name}' not found."
+                self.logger.error(error_message)
+                tool_messages.append(
+                    {
+                        "role": "tool",
+                        "name": tool_name,
+                        "tool_call_id": call_id,
+                        "content": f"Error: {error_message}",
+                        "is_error": True,
+                    }
+                )
+                continue
+
+            try:
+                result = tool_map[tool_name].execute(**arguments)
+                tool_messages.append(
+                    {
+                        "role": "tool",
+                        "name": tool_name,
+                        "tool_call_id": call_id,
                         "content": str(result),
-                    },
-                ]
+                    }
+                )
             except Exception as e:
-                self.logger.error("Tool execution failed: %s", e)
-                return []
-        else:
-            self.logger.error("Tool '%s' not found.", tool_name)
-            return []
+                error_message = f"Tool execution failed: {e}"
+                self.logger.error(error_message)
+                tool_messages.append(
+                    {
+                        "role": "tool",
+                        "name": tool_name,
+                        "tool_call_id": call_id,
+                        "content": f"Error: {error_message}",
+                        "is_error": True,
+                    }
+                )
+
+        assistant_message = {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": assistant_tool_calls,
+        }
+
+        return [assistant_message] + tool_messages
 
     def _create_prompt_hash(
         self,
@@ -230,14 +301,98 @@ class LLMInterface:
         message_content: str,
         tool_content: str,
         temperature: Optional[float] = None,
+        cache_salt: Optional[str] = None,
     ) -> str:
-        """Create a hash of the prompt for caching."""
+        """Create a hash of the prompt for caching.
+
+        Args:
+            model_name (str): Name of the model being used.
+            message_content (str): Concatenated content of all messages.
+            tool_content (str): Concatenated name/description of all tools.
+            temperature (Optional[float]): Sampling temperature, if any.
+            cache_salt (Optional[str]): Optional extra value mixed into the hash so
+                callers whose tools read external state (e.g. files on disk) can
+                invalidate the response cache without changing the conversation.
+        """
         return self._generate_hash(
             model_name
-            + (f"-{temperature}" if temperature else "")
+            + (f"-{temperature}" if temperature is not None else "")
             + message_content
             + tool_content
+            + (f"-{cache_salt}" if cache_salt else "")
         )
+
+    def _chat_once(
+        self,
+        current_messages: List[Dict[str, Any]],
+        converted_tools: List[Dict[str, Any]],
+        kwargs: Dict[str, Any],
+        token_usage: TokenUsage,
+    ) -> Dict[str, Any]:
+        """Make a single request to the underlying client.
+
+        Retries on timeout/connection errors (per ``self.max_retries`` /
+        ``self.retry_delay``) and updates ``token_usage`` from the response.
+        """
+        retry_count = 0
+        response: Dict[str, Any] = {}
+        while retry_count <= self.max_retries:
+            response = self.client.chat(
+                model=self.model_name,
+                tools=converted_tools,
+                messages=current_messages,
+                **kwargs,
+            )
+
+            self.logger.info("Received chat response: %s", response)
+
+            # Check for timeout error
+            if (
+                "error" in response
+                and "error_type" in response
+                and (
+                    response.get("error_type") == errors.TIMEOUT
+                    or response.get("error_type") == errors.CONNECTION
+                )
+            ):
+                retry_count += 1
+                if retry_count <= self.max_retries:
+                    self.logger.warning(
+                        "Request error (%s). Retrying (%d/%d) after %.1f seconds...",
+                        response["error"],
+                        retry_count,
+                        self.max_retries,
+                        self.retry_delay * retry_count,
+                    )
+                    time.sleep(self.retry_delay * retry_count)
+                    continue
+                else:
+                    self.logger.error(
+                        "Request failed out after %d retries.", self.max_retries
+                    )
+                    break
+            else:
+                # Not a timeout error, proceed normally
+                break
+
+        # Special handling for Ollama client
+        if isinstance(self.client, Client):
+            token_usage.update(
+                prompt_tokens=response.get("prompt_eval_count", 0),
+                completion_tokens=response.get("eval_count", 0),
+            )
+        # Extract token usage information from response if available
+        elif response.get("usage"):
+            usage_data = response["usage"]
+            token_usage.update(
+                prompt_tokens=usage_data.get("prompt_tokens", 0),
+                completion_tokens=usage_data.get("completion_tokens", 0),
+                total_tokens=usage_data.get("total_tokens", 0),
+                cached_tokens=usage_data.get("cached_tokens", 0),
+                reasoning_tokens=usage_data.get("reasoning_tokens", 0),
+            )
+
+        return response
 
     def _cached_chat(
         self,
@@ -247,6 +402,9 @@ class LLMInterface:
         response_schema: Optional[Type[BaseModel]] = None,
         token_usage: Optional[TokenUsage] = None,
         allow_json_mode: bool = True,
+        max_tool_rounds: Optional[int] = None,
+        cache_salt: Optional[str] = None,
+        transcript: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """Execute a chat conversation with caching and optional tool execution.
 
@@ -261,6 +419,16 @@ class LLMInterface:
             response_schema (Optional[Type[BaseModel]], optional): Pydantic model for structured output. Defaults to None.
             token_usage (Optional[TokenUsage]): Object to track token usage. If None, uses self.token_usage.
             allow_json_mode (bool): Whether to allow JSON mode for the response. Defaults to True.
+            max_tool_rounds (Optional[int]): Per-call override for the number of tool-call
+                round-trips allowed before a final answer is forced. Defaults to
+                ``self.max_tool_rounds`` when None.
+            cache_salt (Optional[str]): Optional value mixed into the cache key so callers
+                whose tools read external state can invalidate the response cache.
+            transcript (Optional[List[Dict[str, Any]]]): When a list is given, it is
+                filled with the full conversation as sent on the last request (the
+                initial messages plus every tool call and tool result), excluding the
+                final assistant answer, so a caller can continue the conversation
+                without repeating the tool work. Left empty on a cache hit.
 
         Returns:
             str: The content of the chat response message
@@ -269,12 +437,18 @@ class LLMInterface:
             ModelError: If the model returns an error or refuses the request
 
         Note:
-            - Caching is based on a hash of the model name, messages, tools, and temperature
-            - Supports up to 5 sequential tool calls per conversation
+            - Caching is based on a hash of the model name, messages, tools, temperature,
+              and (if provided) cache_salt
+            - Supports up to ``max_tool_rounds`` sequential tool-call rounds per conversation;
+              if the model still wants to call tools after the limit is reached, one final
+              request is made with ``tool_choice="none"`` to force a textual answer
             - Compatible with both OpenAI and Ollama clients
         """
         # Use provided token_usage or default to self.token_usage
         token_usage = token_usage or self.token_usage
+        effective_max_tool_rounds = (
+            max_tool_rounds if max_tool_rounds is not None else self.max_tool_rounds
+        )
 
         # Concatenate all messages to use as the cache key
         message_content = "".join(
@@ -295,6 +469,7 @@ class LLMInterface:
             message_content=message_content,
             tool_content=tool_content,
             temperature=temperature,
+            cache_salt=cache_salt,
         )
 
         self.logger.info("Chatting with messages: %s", messages)
@@ -303,7 +478,7 @@ class LLMInterface:
         response = self.disk_cache.get(prompt_hash)
 
         if response is None:
-            kwargs = {}
+            kwargs: Dict[str, Any] = {}
             current_messages = messages.copy()
 
             # some models can generate structured outputs
@@ -320,74 +495,26 @@ class LLMInterface:
 
             # ollama expects temperature to be passed as an option
             options = {}
-            if temperature:
+            if temperature is not None:
                 options["temperature"] = temperature
                 kwargs["options"] = options
 
-            num_tool_calls = 0
-            max_tool_calls = 5
-            while num_tool_calls < max_tool_calls:
-                num_tool_calls += 1
+            converted_tools = [tool.to_dict() for tool in tools] if tools else []
 
-                converted_tools = [tool.to_dict() for tool in tools] if tools else []
+            # Ollama's native client (and the SSH-tunneled RemoteOllama) have a
+            # fixed keyword signature and raise on unknown kwargs, so only pass
+            # `tool_choice` to clients that can actually accept it.
+            client_accepts_tool_choice = not isinstance(
+                self.client, Client
+            ) and not isinstance(self.client, RemoteOllama)
 
-                # Make request to client using chat interface with retry for timeouts
-                retry_count = 0
-                while retry_count <= self.max_retries:
-                    response = self.client.chat(
-                        model=self.model_name,
-                        tools=converted_tools,
-                        messages=current_messages,
-                        **kwargs,
-                    )
+            num_tool_rounds = 0
+            while True:
+                num_tool_rounds += 1
 
-                    self.logger.info("Received chat response: %s", response)
-
-                    # Check for timeout error
-                    if (
-                        "error" in response
-                        and "error_type" in response
-                        and (
-                            response.get("error_type") == errors.TIMEOUT
-                            or response.get("error_type") == errors.CONNECTION
-                        )
-                    ):
-                        retry_count += 1
-                        if retry_count <= self.max_retries:
-                            self.logger.warning(
-                                "Request error (%s). Retrying (%d/%d) after %.1f seconds...",
-                                response["error"],
-                                retry_count,
-                                self.max_retries,
-                                self.retry_delay * retry_count,
-                            )
-                            time.sleep(self.retry_delay * retry_count)
-                            continue
-                        else:
-                            self.logger.error(
-                                "Request failed out after %d retries.", self.max_retries
-                            )
-                            break
-                    else:
-                        # Not a timeout error, proceed normally
-                        break
-
-                # Special handling for Ollama client
-                if isinstance(self.client, Client):
-                    token_usage.update(
-                        prompt_tokens=response.get("prompt_eval_count", 0),
-                        completion_tokens=response.get("eval_count", 0),
-                    )
-                # Extract token usage information from response if available
-                elif "usage" in response:
-                    usage_data = response["usage"]
-                    token_usage.update(
-                        prompt_tokens=usage_data.get("prompt_tokens", 0),
-                        completion_tokens=usage_data.get("completion_tokens", 0),
-                        total_tokens=usage_data.get("total_tokens", 0),
-                        cached_tokens=usage_data.get("cached_tokens", 0),
-                        reasoning_tokens=usage_data.get("reasoning_tokens", 0),
-                    )
+                response = self._chat_once(
+                    current_messages, converted_tools, kwargs, token_usage
+                )
 
                 # Check if the response contains tool calls
                 tool_calls = response.get("message", {}).get("tool_calls", [])
@@ -395,12 +522,47 @@ class LLMInterface:
                     break
 
                 self.logger.info("Received tool calls: %s", tool_calls)
-                # Execute tools and add results to messages
-                for tool_call in tool_calls:
-                    tool_messages = self._execute_tool(tool_call, tools)
-                    current_messages.extend(tool_messages)
+                # Execute all tool calls from this turn as one unit and add
+                # the results to the conversation.
+                tool_messages = self._execute_tool_calls(tool_calls, tools or [])
+                current_messages.extend(tool_messages)
+
+                if num_tool_rounds >= effective_max_tool_rounds:
+                    # We've used up the allowed tool-call rounds and the model
+                    # still wants to call tools. Rather than silently return an
+                    # empty response, ask explicitly for a final answer and
+                    # force the model to stop calling tools.
+                    self.logger.warning(
+                        "Reached max_tool_rounds (%d) with pending tool calls; "
+                        "forcing a final answer.",
+                        effective_max_tool_rounds,
+                    )
+                    current_messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "The tool-call limit has been reached. You must "
+                                "provide a final answer now without calling any "
+                                "more tools."
+                            ),
+                        }
+                    )
+                    self.logger.info("Chatting with messages: %s", current_messages)
+
+                    final_kwargs = dict(kwargs)
+                    if client_accepts_tool_choice:
+                        final_kwargs["tool_choice"] = "none"
+
+                    response = self._chat_once(
+                        current_messages, converted_tools, final_kwargs, token_usage
+                    )
+                    break
 
                 self.logger.info("Chatting with messages: %s", current_messages)
+
+            if transcript is not None:
+                transcript.clear()
+                transcript.extend(current_messages)
 
             # Cache the response with hashed prompt as key
             try:
@@ -425,6 +587,9 @@ class LLMInterface:
         response_schema: Optional[Type[BaseModel]] = None,
         token_usage: Optional[TokenUsage] = None,
         allow_json_mode: bool = True,
+        max_tool_rounds: Optional[int] = None,
+        cache_salt: Optional[str] = None,
+        transcript: Optional[List[Dict[str, Any]]] = None,
     ) -> str:
         """
         Sends a chat request to the LLM and returns the response.
@@ -441,6 +606,10 @@ class LLMInterface:
                 If provided, the response will be parsed according to this schema. Defaults to None.
             token_usage (Optional[TokenUsage]): Object to track token usage. If None, uses self.token_usage.
             allow_json_mode (bool): Whether to allow JSON mode for the response. Defaults to True. Set False for a straight chat experience.
+            max_tool_rounds (Optional[int]): Per-call override for the number of tool-call round-trips
+                allowed before a final answer is forced. Defaults to ``self.max_tool_rounds`` when None.
+            cache_salt (Optional[str]): Optional value mixed into the cache key, useful when tools read
+                external state (e.g. files) so a stale cached response can be invalidated on demand.
 
         Returns:
             str: The LLM's response text, stripped of leading/trailing whitespace if string,
@@ -459,6 +628,9 @@ class LLMInterface:
             response_schema=response_schema,
             token_usage=token_usage,
             allow_json_mode=allow_json_mode,
+            max_tool_rounds=max_tool_rounds,
+            cache_salt=cache_salt,
+            transcript=transcript,
         )
         self.logger.info(
             "Received chat response: %s...",
@@ -504,6 +676,8 @@ class LLMInterface:
         temperature: Optional[float] = None,
         token_usage: Optional[TokenUsage] = None,
         images: Optional[List[str]] = None,
+        max_tool_rounds: Optional[int] = None,
+        cache_salt: Optional[str] = None,
         **kwargs,
     ) -> Optional[BaseModel]:
         """
@@ -526,6 +700,9 @@ class LLMInterface:
                 the generated output. It should return an error message if validation fails, otherwise None.
             token_usage (Optional[TokenUsage]): Object to track token usage. If None, uses self.token_usage.
             images (Optional[List[str]]): List of image paths to encode and send to the model.
+            max_tool_rounds (Optional[int]): Per-call override for the number of tool-call round-trips
+                allowed before a final answer is forced. Passed through to ``chat()``.
+            cache_salt (Optional[str]): Optional value mixed into the cache key. Passed through to ``chat()``.
             **kwargs: Additional keyword arguments for populating the prompt template.
 
         Returns:
@@ -562,6 +739,9 @@ class LLMInterface:
         while iteration < 3:
             iteration += 1
 
+            # A retry continues the conversation that produced the bad answer,
+            # tool calls and results included, so the model keeps what it read.
+            transcript: List[Dict[str, Any]] = []
             try:
                 raw_response = self.chat(
                     messages=messages,
@@ -569,18 +749,19 @@ class LLMInterface:
                     response_schema=new_output_schema,
                     tools=tools,
                     token_usage=token_usage,
+                    max_tool_rounds=max_tool_rounds,
+                    cache_salt=cache_salt,
+                    transcript=transcript,
                 )
             except ModelError as e:
                 raw_response = None
-                messages.extend(
-                    [
-                        {"role": "assistant", "content": str(e)},
-                        {
-                            "role": "user",
-                            "content": "Try again while avoiding the previous error.",
-                        },
-                    ]
-                )
+                messages = (transcript or messages) + [
+                    {"role": "assistant", "content": str(e)},
+                    {
+                        "role": "user",
+                        "content": "Try again while avoiding the previous error.",
+                    },
+                ]
                 continue
 
             if self.support_structured_outputs:
@@ -606,15 +787,13 @@ class LLMInterface:
                 error_message, response = self._parse_response(raw_response, parser)
 
             if response is None:
-                messages.extend(
-                    [
-                        {"role": "assistant", "content": raw_response},
-                        {
-                            "role": "user",
-                            "content": f"Try again. Your previous response was invalid and led to this error message: {error_message}",
-                        },
-                    ]
-                )
+                messages = (transcript or messages) + [
+                    {"role": "assistant", "content": raw_response or ""},
+                    {
+                        "role": "user",
+                        "content": f"Try again. Your previous response was invalid and led to this error message: {error_message}",
+                    },
+                ]
                 continue
 
             if extra_validation:
@@ -627,15 +806,13 @@ class LLMInterface:
                         raise ValueError(
                             "The response should be a string if the model does not support structured outputs."
                         )
-                    messages.extend(
-                        [
-                            {"role": "assistant", "content": raw_response},
-                            {
-                                "role": "user",
-                                "content": f"Try again. Your previous response was invalid and led to this error message: {extra_error_message}",
-                            },
-                        ]
-                    )
+                    messages = (transcript or messages) + [
+                        {"role": "assistant", "content": raw_response},
+                        {
+                            "role": "user",
+                            "content": f"Try again. Your previous response was invalid and led to this error message: {extra_error_message}",
+                        },
+                    ]
                     continue
             break
 

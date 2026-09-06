@@ -1,6 +1,6 @@
 import unittest
-from typing import List, Optional
-from llm_interface.llm_tool import Tool, create_tool, tool
+from typing import List, Literal, Optional
+from llm_interface.llm_tool import Tool, _type_to_json_schema, create_tool, tool
 
 
 class TestLLMTool(unittest.TestCase):
@@ -193,6 +193,111 @@ class TestLLMTool(unittest.TestCase):
         self.assertEqual(tool.parameters["properties"]["x"]["type"], "string")
         self.assertEqual(tool.parameters["properties"]["y"]["type"], "string")
 
+    def test_type_to_json_schema_optional_typing_union(self):
+        """Optional[X] (typing.Union[X, None]) resolves to X's schema."""
+        self.assertEqual(_type_to_json_schema(Optional[int]), {"type": "integer"})
+        self.assertEqual(_type_to_json_schema(Optional[str]), {"type": "string"})
+
+    def test_type_to_json_schema_pep604_union_none(self):
+        """The `X | None` shorthand (types.UnionType) resolves the same way."""
+        self.assertEqual(_type_to_json_schema(int | None), {"type": "integer"})
+        self.assertEqual(_type_to_json_schema(str | None), {"type": "string"})
+
+    def test_type_to_json_schema_literal_strings(self):
+        schema = _type_to_json_schema(Literal["celsius", "fahrenheit"])
+        self.assertEqual(schema["type"], "string")
+        self.assertEqual(schema["enum"], ["celsius", "fahrenheit"])
+
+    def test_type_to_json_schema_literal_ints(self):
+        schema = _type_to_json_schema(Literal[1, 2, 3])
+        self.assertEqual(schema["type"], "integer")
+        self.assertEqual(schema["enum"], [1, 2, 3])
+
+    def test_create_tool_with_optional_literal_parameter(self):
+        def set_unit(unit: Literal["celsius", "fahrenheit"] = "celsius") -> str:
+            """Set the unit.
+
+            Args:
+                unit: The unit to use
+            """
+            return unit
+
+        unit_tool = create_tool(set_unit)
+        schema = unit_tool.parameters["properties"]["unit"]
+        self.assertEqual(schema["type"], "string")
+        self.assertEqual(schema["enum"], ["celsius", "fahrenheit"])
+
+    def test_create_tool_strict_when_all_params_required(self):
+        """strict is auto-enabled only when every parameter is required."""
+
+        def add(x: int, y: int) -> int:
+            """Add two numbers.
+
+            Args:
+                x: first number
+                y: second number
+            """
+            return x + y
+
+        add_tool = create_tool(add)
+        self.assertTrue(add_tool.strict)
+
+        tool_dict = add_tool.to_dict()
+        self.assertTrue(tool_dict["function"]["strict"])
+
+    def test_create_tool_not_strict_with_default_parameter(self):
+        """A function with any optional (defaulted) parameter is not strict,
+        since OpenAI's strict mode rejects schemas with optional properties."""
+
+        def get_weather(location: str, units: str = "celsius") -> str:
+            """Get the weather for a location.
+
+            Args:
+                location: The location
+                units: The units
+            """
+            return f"{location} in {units}"
+
+        weather_tool = create_tool(get_weather)
+        self.assertFalse(weather_tool.strict)
+
+        tool_dict = weather_tool.to_dict()
+        self.assertNotIn("strict", tool_dict["function"])
+
+    def test_tool_to_dict_omits_strict_by_default(self):
+        plain_tool = Tool(
+            name="plain",
+            description="A plain tool",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=lambda: None,
+        )
+        self.assertFalse(plain_tool.strict)
+        self.assertNotIn("strict", plain_tool.to_dict()["function"])
+
+    def test_tool_to_dict_includes_strict_when_set(self):
+        strict_tool = Tool(
+            name="strict",
+            description="A strict tool",
+            parameters={"type": "object", "properties": {}, "required": []},
+            func=lambda: None,
+            strict=True,
+        )
+        self.assertTrue(strict_tool.to_dict()["function"]["strict"])
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUnionSchemas(unittest.TestCase):
+    def test_multi_member_union_becomes_any_of(self):
+        from typing import Union
+
+        from llm_interface.llm_tool import _type_to_json_schema
+
+        self.assertEqual(
+            _type_to_json_schema(Union[int, str]),
+            {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+        )
+        # Optional keeps collapsing to the single member
+        self.assertEqual(_type_to_json_schema(Optional[int]), {"type": "integer"})
