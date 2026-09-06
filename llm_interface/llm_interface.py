@@ -47,6 +47,10 @@ class ModelError(Exception):
     pass
 
 
+# seconds to wait (times the attempt number) after a provider rate limit
+RATE_LIMIT_RETRY_DELAY = 15.0
+
+
 class LLMInterface:
     """
     A unified interface for interacting with various Language Learning Models (LLMs).
@@ -180,7 +184,10 @@ class LLMInterface:
         return new_model
 
     def _execute_tool_calls(
-        self, tool_calls: List[Dict[str, Any]], tools: List[Tool]
+        self,
+        tool_calls: List[Dict[str, Any]],
+        tools: List[Tool],
+        assistant_extra: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Execute every tool call made in a single assistant turn, as one unit.
 
@@ -199,6 +206,9 @@ class LLMInterface:
         Args:
             tool_calls (List[Dict[str, Any]]): The tool calls from the assistant's response.
             tools (List[Tool]): The tools available for execution.
+            assistant_extra (Optional[Dict[str, Any]]): Extra keys to keep on the
+                assistant message, e.g. provider-specific items a client needs to
+                replay on the next request.
 
         Returns:
             List[Dict[str, Any]]: ``[assistant_message, tool_message, ...]`` - one
@@ -287,11 +297,13 @@ class LLMInterface:
                     }
                 )
 
-        assistant_message = {
+        assistant_message: Dict[str, Any] = {
             "role": "assistant",
             "content": "",
             "tool_calls": assistant_tool_calls,
         }
+        if assistant_extra:
+            assistant_message.update(assistant_extra)
 
         return [assistant_message] + tool_messages
 
@@ -346,25 +358,24 @@ class LLMInterface:
 
             self.logger.info("Received chat response: %s", response)
 
-            # Check for timeout error
-            if (
-                "error" in response
-                and "error_type" in response
-                and (
-                    response.get("error_type") == errors.TIMEOUT
-                    or response.get("error_type") == errors.CONNECTION
-                )
-            ):
+            # Check for a transient error: timeouts, connection problems and
+            # rate limits are retried with a growing delay
+            error_type = response.get("error_type") if "error" in response else None
+            if error_type in (errors.TIMEOUT, errors.CONNECTION, errors.RATE_LIMIT):
                 retry_count += 1
                 if retry_count <= self.max_retries:
+                    delay = self.retry_delay * retry_count
+                    if error_type == errors.RATE_LIMIT:
+                        # per-minute token limits need real time to clear
+                        delay = max(delay, RATE_LIMIT_RETRY_DELAY * retry_count)
                     self.logger.warning(
                         "Request error (%s). Retrying (%d/%d) after %.1f seconds...",
                         response["error"],
                         retry_count,
                         self.max_retries,
-                        self.retry_delay * retry_count,
+                        delay,
                     )
-                    time.sleep(self.retry_delay * retry_count)
+                    time.sleep(delay)
                     continue
                 else:
                     self.logger.error(
@@ -390,6 +401,7 @@ class LLMInterface:
                 total_tokens=usage_data.get("total_tokens", 0),
                 cached_tokens=usage_data.get("cached_tokens", 0),
                 reasoning_tokens=usage_data.get("reasoning_tokens", 0),
+                cache_creation_tokens=usage_data.get("cache_creation_tokens", 0),
             )
 
         return response
@@ -523,8 +535,19 @@ class LLMInterface:
 
                 self.logger.info("Received tool calls: %s", tool_calls)
                 # Execute all tool calls from this turn as one unit and add
-                # the results to the conversation.
-                tool_messages = self._execute_tool_calls(tool_calls, tools or [])
+                # the results to the conversation. Clients that replay their
+                # own output items (the Responses API) keep them on the
+                # assistant message.
+                assistant_extra = None
+                if getattr(self.client, "keeps_provider_items", False):
+                    assistant_extra = {
+                        key: value
+                        for key, value in response.get("message", {}).items()
+                        if key not in ("content", "tool_calls")
+                    }
+                tool_messages = self._execute_tool_calls(
+                    tool_calls, tools or [], assistant_extra=assistant_extra
+                )
                 current_messages.extend(tool_messages)
 
                 if num_tool_rounds >= effective_max_tool_rounds:

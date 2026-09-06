@@ -27,14 +27,21 @@ class TokenUsage(BaseModel):
         prompt_tokens (int): Number of tokens used in the prompt/input
         completion_tokens (int): Number of tokens generated in the response
         total_tokens (int): Total tokens used (prompt + completion)
-        cached_tokens (int): Number of tokens retrieved from cache (if supported)
-        reasoning_tokens (int): Number of tokens used for reasoning (if supported)
+        cached_tokens (int): Number of prompt tokens read from the provider's prompt
+            cache (if supported); they are billed at the cache-read rate
+        cache_creation_tokens (int): Number of prompt tokens written to the provider's
+            prompt cache (if supported); billed at the cache-write rate
+        reasoning_tokens (int): Number of tokens used for reasoning (if supported).
+            Reasoning tokens are part of completion_tokens. For Anthropic this is an
+            estimate: output tokens not accounted for by the visible text and tool calls
+            when the response contains thinking blocks
     """
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
     cached_tokens: int = 0
+    cache_creation_tokens: int = 0
     reasoning_tokens: int = 0
 
     def update(
@@ -44,6 +51,7 @@ class TokenUsage(BaseModel):
         total_tokens: int = 0,
         cached_tokens: int = 0,
         reasoning_tokens: int = 0,
+        cache_creation_tokens: int = 0,
     ):
         """
         Updates token usage statistics.
@@ -54,6 +62,7 @@ class TokenUsage(BaseModel):
             total_tokens (int): Total tokens used
             cached_tokens (int): Number of tokens from cache
             reasoning_tokens (int): Number of reasoning tokens
+            cache_creation_tokens (int): Number of tokens written to the prompt cache
             **kwargs: Additional provider-specific metrics
         """
         self.prompt_tokens += prompt_tokens
@@ -66,6 +75,7 @@ class TokenUsage(BaseModel):
             self.total_tokens += prompt_tokens + completion_tokens
 
         self.cached_tokens += cached_tokens
+        self.cache_creation_tokens += cache_creation_tokens
         self.reasoning_tokens += reasoning_tokens
 
     def reset(self):
@@ -74,6 +84,7 @@ class TokenUsage(BaseModel):
         self.completion_tokens = 0
         self.total_tokens = 0
         self.cached_tokens = 0
+        self.cache_creation_tokens = 0
         self.reasoning_tokens = 0
 
     def get_all_stats(self) -> Dict[str, int]:
@@ -92,6 +103,8 @@ class TokenUsage(BaseModel):
         # Only include non-zero values for optional fields
         if self.cached_tokens > 0:
             stats["cached_tokens"] = self.cached_tokens
+        if self.cache_creation_tokens > 0:
+            stats["cache_creation_tokens"] = self.cache_creation_tokens
         if self.reasoning_tokens > 0:
             stats["reasoning_tokens"] = self.reasoning_tokens
 
@@ -102,6 +115,8 @@ class TokenUsage(BaseModel):
         result = f"Token usage: {self.total_tokens} total ({self.prompt_tokens} prompt, {self.completion_tokens} completion)"
         if self.cached_tokens > 0:
             result += f", {self.cached_tokens} cached"
+        if self.cache_creation_tokens > 0:
+            result += f", {self.cache_creation_tokens} cache writes"
         if self.reasoning_tokens > 0:
             result += f", {self.reasoning_tokens} reasoning"
         return result

@@ -14,14 +14,17 @@
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from ollama import ListResponse
+from openai import pydantic_function_tool
 from openai import (
     APITimeoutError,
+    BadRequestError,
     ContentFilterFinishReasonError,
     LengthFinishReasonError,
     OpenAI,
+    RateLimitError,
 )
 
 from . import errors
@@ -164,13 +167,92 @@ def convert_openai_models_to_ollama_response(openai_models_data) -> ListResponse
     return ListResponse(models=ollama_models)
 
 
+def _json_schema_response_format(schema: Any) -> Dict[str, Any]:
+    """A strict ``json_schema`` response_format for a Pydantic model, built the
+    same way the SDK's ``parse`` helper builds it."""
+    strict_schema = pydantic_function_tool(schema)["function"]["parameters"]
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema.__name__,
+            "schema": strict_schema,
+            "strict": True,
+        },
+    }
+
+
 class OpenAIWrapper:
-    def __init__(self, api_key: str, max_tokens: int = 4096, timeout: float = 600.0):
+    def __init__(
+        self,
+        api_key: str,
+        max_tokens: int = 4096,
+        timeout: float = 600.0,
+        reasoning_effort: Optional[str] = None,
+    ):
+        """
+        Args:
+            api_key (str): OpenAI API key.
+            max_tokens (int): Default ``max_completion_tokens`` for requests.
+            timeout (float): Request timeout in seconds.
+            reasoning_effort (Optional[str]): Forwarded as ``reasoning_effort`` on
+                every request for reasoning models (e.g. "none", "low", "medium",
+                "high"). None leaves the model default.
+        """
         self.client = OpenAI(api_key=api_key, timeout=timeout)
         self.max_tokens = max_tokens
+        self.reasoning_effort = reasoning_effort
+        # models (gpt-5.6-luna on chat completions) that only accept function
+        # tools with reasoning_effort "none"; filled in after the first rejection
+        self._effort_rejected_with_tools: Set[str] = set()
 
     def list(self) -> ListResponse:
         return convert_openai_models_to_ollama_response(self.client.models.list())
+
+    def _complete(
+        self,
+        api_params: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]],
+        kwargs: Dict[str, Any],
+    ):
+        """One request. Returns (response, message, content), or a refusal dict."""
+        if "response_schema" in kwargs:
+            schema = kwargs["response_schema"]
+            strict_tools = all(
+                tool.get("function", {}).get("strict") for tool in (tools or [])
+            )
+            if strict_tools:
+                # `client.beta.chat.completions.parse` is deprecated in openai
+                # 3.x; use the stable `client.chat.completions.parse` instead.
+                response = self.client.chat.completions.parse(
+                    response_format=schema,
+                    **api_params,
+                )
+                message = response.choices[0].message
+
+                # Check for refusal
+                if "refusal" in message:
+                    return {"refusal": message.refusal, "content": None, "done": False}
+
+                return response, message, message.parsed
+
+            # parse() refuses to run with non-strict function tools (any tool
+            # with an optional parameter). Ask for the schema as a strict
+            # json_schema response_format instead and hand the JSON text back;
+            # LLMInterface validates it against the model.
+            response = self.client.chat.completions.create(
+                response_format=_json_schema_response_format(schema),
+                **api_params,
+            )
+            message = response.choices[0].message
+            if getattr(message, "refusal", None):
+                return {"refusal": message.refusal, "content": None, "done": False}
+            return response, message, message.content
+
+        if "format" in kwargs and kwargs["format"] == "json":
+            api_params["response_format"] = {"type": "json_object"}
+        response = self.client.chat.completions.create(**api_params)
+        message = response.choices[0].message
+        return response, message, message.content
 
     def chat(
         self,
@@ -235,29 +317,40 @@ class OpenAIWrapper:
         if kwargs.get("tool_choice") is not None:
             api_params["tool_choice"] = kwargs["tool_choice"]
 
+        if tools and api_params["model"] in self._effort_rejected_with_tools:
+            api_params["reasoning_effort"] = "none"
+        elif self.reasoning_effort is not None:
+            api_params["reasoning_effort"] = self.reasoning_effort
+
         logging.debug("API parameters: %s", api_params)
 
         try:
-            if "response_schema" in kwargs:
-                # `client.beta.chat.completions.parse` is deprecated in openai
-                # 3.x; use the stable `client.chat.completions.parse` instead.
-                response = self.client.chat.completions.parse(
-                    response_format=kwargs.get("response_schema"),
-                    **api_params,
-                )
-                message = response.choices[0].message
-
-                # Check for refusal
-                if "refusal" in message:
-                    return {"refusal": message.refusal, "content": None, "done": False}
-
-                content = message.parsed
-            else:
-                if "format" in kwargs and kwargs["format"] == "json":
-                    api_params["response_format"] = {"type": "json_object"}
-                response = self.client.chat.completions.create(**api_params)
-                message = response.choices[0].message
-                content = message.content
+            try:
+                completed = self._complete(api_params, tools, kwargs)
+            except BadRequestError as e:
+                message_text = str(e)
+                if (
+                    tools
+                    and "reasoning_effort" in message_text
+                    and "not supported" in message_text
+                    and api_params.get("reasoning_effort") != "none"
+                ):
+                    # e.g. "Function tools with reasoning_effort are not supported
+                    # for gpt-5.6-luna in /v1/chat/completions. To use function
+                    # tools, use /v1/responses or set reasoning_effort to 'none'."
+                    logging.warning(
+                        "%s only accepts function tools with reasoning_effort "
+                        "'none' on chat completions; retrying that way",
+                        api_params["model"],
+                    )
+                    self._effort_rejected_with_tools.add(api_params["model"])
+                    api_params["reasoning_effort"] = "none"
+                    completed = self._complete(api_params, tools, kwargs)
+                else:
+                    raise
+            if isinstance(completed, dict):
+                return completed  # a refusal
+            response, message, content = completed
 
             # Log the usage details
             usage = response.usage
@@ -288,9 +381,13 @@ class OpenAIWrapper:
                 "done": response.choices[0].finish_reason == "stop",
             }
             if usage.prompt_tokens_details:
-                return_message["usage"][
-                    "cached_tokens"
-                ] = usage.prompt_tokens_details.cached_tokens
+                return_message["usage"]["cached_tokens"] = (
+                    usage.prompt_tokens_details.cached_tokens or 0
+                )
+            if usage.completion_tokens_details:
+                return_message["usage"]["reasoning_tokens"] = (
+                    usage.completion_tokens_details.reasoning_tokens or 0
+                )
             # Check for tool calls
             if message.tool_calls:
                 return_message["message"]["tool_calls"] = [
@@ -317,6 +414,14 @@ class OpenAIWrapper:
             return {
                 "error": "Content was rejected by the content filter.",
                 "error_type": errors.CONTENT_FILTER,
+                "content": None,
+                "done": False,
+                "usage": None,
+            }
+        except RateLimitError as e:
+            return {
+                "error": f"Rate limited: {e}",
+                "error_type": errors.RATE_LIMIT,
                 "content": None,
                 "done": False,
                 "usage": None,
