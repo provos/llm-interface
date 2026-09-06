@@ -45,6 +45,86 @@ class TestReasoningEffort(unittest.TestCase):
         self.assertNotIn("reasoning_effort", kwargs)
 
 
+class TestStructuredOutputWithNonStrictTools(unittest.TestCase):
+    def setUp(self):
+        with patch("llm_interface.openai.OpenAI"):
+            self.wrapper = OpenAIWrapper(api_key="k")
+        self.wrapper.client = MagicMock()
+
+    def test_non_strict_tools_use_create_with_a_strict_json_schema(self):
+        from pydantic import BaseModel
+
+        class Answer(BaseModel):
+            file: str = ""
+            relevant: bool
+
+        response = fake_response()
+        response.choices[0].message.content = '{"file": "", "relevant": true}'
+        response.choices[0].message.refusal = None
+        self.wrapper.client.chat.completions.create.return_value = response
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+        result = self.wrapper.chat(
+            [{"role": "user", "content": "hi"}],
+            tools=tools,
+            model="gpt-5.6-luna",
+            response_schema=Answer,
+        )
+
+        self.wrapper.client.chat.completions.parse.assert_not_called()
+        kwargs = self.wrapper.client.chat.completions.create.call_args.kwargs
+        self.assertEqual(kwargs["response_format"]["type"], "json_schema")
+        self.assertTrue(kwargs["response_format"]["json_schema"]["strict"])
+        schema = kwargs["response_format"]["json_schema"]["schema"]
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(sorted(schema["required"]), ["file", "relevant"])
+        self.assertEqual(kwargs["tools"], tools)
+        self.assertEqual(result["message"]["content"], '{"file": "", "relevant": true}')
+
+    def test_strict_tools_keep_using_parse(self):
+        from pydantic import BaseModel
+
+        class Answer(BaseModel):
+            relevant: bool
+
+        parsed = MagicMock()
+        parsed.choices = [MagicMock()]
+        parsed.choices[0].message.parsed = Answer(relevant=True)
+        parsed.choices[0].message.tool_calls = None
+        parsed.choices[0].message.__contains__ = lambda self, key: False
+        parsed.choices[0].finish_reason = "stop"
+        parsed.usage = fake_response().usage
+        self.wrapper.client.chat.completions.parse.return_value = parsed
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "ping",
+                    "strict": True,
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
+
+        result = self.wrapper.chat(
+            [{"role": "user", "content": "hi"}],
+            tools=tools,
+            model="gpt-5.6-luna",
+            response_schema=Answer,
+        )
+
+        self.wrapper.client.chat.completions.create.assert_not_called()
+        self.assertEqual(result["message"]["content"], Answer(relevant=True))
+
+
 class TestStructuredOutputVersions(unittest.TestCase):
     def test_dotted_and_named_gpt5_models(self):
         for name in ("gpt-5", "gpt-5-mini", "gpt-5.6-luna", "gpt-5.4-nano", "gpt-6"):

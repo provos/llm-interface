@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ollama import ListResponse
+from openai import pydantic_function_tool
 from openai import (
     APITimeoutError,
     ContentFilterFinishReasonError,
@@ -164,6 +165,20 @@ def convert_openai_models_to_ollama_response(openai_models_data) -> ListResponse
     return ListResponse(models=ollama_models)
 
 
+def _json_schema_response_format(schema: Any) -> Dict[str, Any]:
+    """A strict ``json_schema`` response_format for a Pydantic model, built the
+    same way the SDK's ``parse`` helper builds it."""
+    strict_schema = pydantic_function_tool(schema)["function"]["parameters"]
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema.__name__,
+            "schema": strict_schema,
+            "strict": True,
+        },
+    }
+
+
 class OpenAIWrapper:
     def __init__(
         self,
@@ -258,19 +273,45 @@ class OpenAIWrapper:
 
         try:
             if "response_schema" in kwargs:
-                # `client.beta.chat.completions.parse` is deprecated in openai
-                # 3.x; use the stable `client.chat.completions.parse` instead.
-                response = self.client.chat.completions.parse(
-                    response_format=kwargs.get("response_schema"),
-                    **api_params,
+                schema = kwargs["response_schema"]
+                strict_tools = all(
+                    tool.get("function", {}).get("strict") for tool in (tools or [])
                 )
-                message = response.choices[0].message
+                if strict_tools:
+                    # `client.beta.chat.completions.parse` is deprecated in openai
+                    # 3.x; use the stable `client.chat.completions.parse` instead.
+                    response = self.client.chat.completions.parse(
+                        response_format=schema,
+                        **api_params,
+                    )
+                    message = response.choices[0].message
 
-                # Check for refusal
-                if "refusal" in message:
-                    return {"refusal": message.refusal, "content": None, "done": False}
+                    # Check for refusal
+                    if "refusal" in message:
+                        return {
+                            "refusal": message.refusal,
+                            "content": None,
+                            "done": False,
+                        }
 
-                content = message.parsed
+                    content = message.parsed
+                else:
+                    # parse() refuses to run with non-strict function tools (any
+                    # tool with an optional parameter). Ask for the schema as a
+                    # strict json_schema response_format instead and hand the JSON
+                    # text back; LLMInterface validates it against the model.
+                    response = self.client.chat.completions.create(
+                        response_format=_json_schema_response_format(schema),
+                        **api_params,
+                    )
+                    message = response.choices[0].message
+                    if getattr(message, "refusal", None):
+                        return {
+                            "refusal": message.refusal,
+                            "content": None,
+                            "done": False,
+                        }
+                    content = message.content
             else:
                 if "format" in kwargs and kwargs["format"] == "json":
                     api_params["response_format"] = {"type": "json_object"}
