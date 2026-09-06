@@ -345,3 +345,11 @@ class TestTranslateToolsForOpenAI(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestToolMessageValidation(unittest.TestCase):
+    def test_missing_tool_call_id_fails_fast(self):
+        from llm_interface.openai import translate_tools_for_openai
+
+        with self.assertRaises(ValueError):
+            translate_tools_for_openai([{"role": "tool", "content": "x"}])

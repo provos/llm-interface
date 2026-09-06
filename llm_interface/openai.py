@@ -58,11 +58,16 @@ def translate_tools_for_openai(messages: List[Dict[str, Any]]) -> List[Dict[str,
             new_message["tool_calls"] = new_tool_calls
             translated_messages.append(new_message)
         elif message.get("role") == "tool":
+            if not message.get("tool_call_id"):
+                raise ValueError(
+                    "A tool message must carry the tool_call_id it answers; "
+                    f"got {message!r}"
+                )
             translated_messages.append(
                 {
                     "role": "tool",
                     "content": message.get("content", ""),
-                    "tool_call_id": message.get("tool_call_id", ""),
+                    "tool_call_id": message["tool_call_id"],
                 }
             )
         else:

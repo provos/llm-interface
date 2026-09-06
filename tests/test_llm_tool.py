@@ -287,3 +287,17 @@ class TestLLMTool(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUnionSchemas(unittest.TestCase):
+    def test_multi_member_union_becomes_any_of(self):
+        from typing import Union
+
+        from llm_interface.llm_tool import _type_to_json_schema
+
+        self.assertEqual(
+            _type_to_json_schema(Union[int, str]),
+            {"anyOf": [{"type": "integer"}, {"type": "string"}]},
+        )
+        # Optional keeps collapsing to the single member
+        self.assertEqual(_type_to_json_schema(Optional[int]), {"type": "integer"})

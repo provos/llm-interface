@@ -59,7 +59,7 @@ def _type_to_json_schema(type_hint: Any) -> Dict[str, Any]:
             inferred_type = "string"
         return {"type": inferred_type, "enum": list(values)}
 
-    # Optional[X] / Union[X, None] / X | None -> the schema for X
+    # Optional[X] / Union[X, None] / X | None -> the schema for X; wider unions -> anyOf
     if origin in _UNION_ORIGINS:
         non_none_args = [
             arg for arg in typing.get_args(type_hint) if arg is not type(None)
@@ -67,8 +67,13 @@ def _type_to_json_schema(type_hint: Any) -> Dict[str, Any]:
         if len(non_none_args) == 1:
             return _type_to_json_schema(non_none_args[0])
         elif non_none_args:
-            # Multiple non-None options: fall back to the first one.
-            return _type_to_json_schema(non_none_args[0])
+            # Union[A, B] / A | B: every member is acceptable
+            schemas = []
+            for arg in non_none_args:
+                schema = _type_to_json_schema(arg)
+                if schema not in schemas:
+                    schemas.append(schema)
+            return schemas[0] if len(schemas) == 1 else {"anyOf": schemas}
         return {"type": "string"}
 
     if type_hint == str:

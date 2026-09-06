@@ -1536,3 +1536,19 @@ class TestRetryKeepsToolTranscript(unittest.TestCase):
         self.assertEqual(roles[-1], "user")
         self.assertIn("Try again", retry_messages[-1]["content"])
         self.assertIn("field1 must be good", retry_messages[-1]["content"])
+
+
+class TestTemperatureZero(unittest.TestCase):
+    def setUp(self):
+        self.mock_client = Mock(spec=Client)
+        self.llm = LLMInterface(client=self.mock_client)
+        self.llm.disk_cache = MockCache()
+
+    def test_zero_temperature_is_forwarded_and_keyed_separately(self):
+        self.mock_client.chat.return_value = {"message": {"content": "hi"}}
+        self.llm.chat(messages=[{"role": "user", "content": "x"}], temperature=0.0)
+        kwargs = self.mock_client.chat.call_args[1]
+        self.assertEqual(kwargs["options"]["temperature"], 0.0)
+        with_zero = self.llm._create_prompt_hash("m", "c", "", temperature=0.0)
+        unset = self.llm._create_prompt_hash("m", "c", "", temperature=None)
+        self.assertNotEqual(with_zero, unset)

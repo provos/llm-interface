@@ -316,7 +316,7 @@ class LLMInterface:
         """
         return self._generate_hash(
             model_name
-            + (f"-{temperature}" if temperature else "")
+            + (f"-{temperature}" if temperature is not None else "")
             + message_content
             + tool_content
             + (f"-{cache_salt}" if cache_salt else "")
@@ -495,7 +495,7 @@ class LLMInterface:
 
             # ollama expects temperature to be passed as an option
             options = {}
-            if temperature:
+            if temperature is not None:
                 options["temperature"] = temperature
                 kwargs["options"] = options
 

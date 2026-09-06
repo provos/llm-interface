@@ -123,7 +123,17 @@ def translate_messages_for_anthropic(
                 function = tool_call["function"]
                 tool_input = function["arguments"]
                 if isinstance(tool_input, str):
-                    tool_input = json.loads(tool_input)
+                    try:
+                        tool_input = json.loads(tool_input)
+                    except json.JSONDecodeError:
+                        # keep the transcript replayable: Anthropic needs an
+                        # object here, and the tool result already reports the
+                        # parse failure to the model
+                        logging.warning(
+                            "Unparseable tool arguments for %s; sending raw string",
+                            function["name"],
+                        )
+                        tool_input = {"raw_arguments": tool_input}
                 content.append(
                     {
                         "type": "tool_use",

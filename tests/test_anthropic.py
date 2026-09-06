@@ -609,3 +609,25 @@ class TestAnthropicStreamParseFailure(unittest.TestCase):
         self.assertIn("error", response)
         self.assertIn("could not be parsed", response["error"])
         self.assertIsNone(response["content"])
+
+
+class TestUnparseableToolArguments(unittest.TestCase):
+    def test_raw_string_arguments_do_not_crash_translation(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "t1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": "{not json"},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "t1", "content": "Error: bad args"},
+        ]
+        translated = translate_messages_for_anthropic(messages)
+        tool_use = translated[0]["content"][-1]
+        self.assertEqual(tool_use["type"], "tool_use")
+        self.assertEqual(tool_use["input"], {"raw_arguments": "{not json"})
