@@ -45,6 +45,52 @@ class TestReasoningEffort(unittest.TestCase):
         self.assertNotIn("reasoning_effort", kwargs)
 
 
+class TestEffortRejectedWithTools(unittest.TestCase):
+    def test_retries_without_effort_and_remembers(self):
+        import httpx
+        from openai import BadRequestError
+
+        with patch("llm_interface.openai.OpenAI"):
+            wrapper = OpenAIWrapper(api_key="k", reasoning_effort="low")
+        wrapper.client = MagicMock()
+        rejection = BadRequestError(
+            "Function tools with reasoning_effort are not supported for gpt-5.6-luna",
+            response=httpx.Response(400, request=httpx.Request("POST", "https://x")),
+            body=None,
+        )
+        wrapper.client.chat.completions.create.side_effect = [
+            rejection,
+            fake_response(),
+        ]
+        tools = [{"type": "function", "function": {"name": "ping", "parameters": {}}}]
+
+        wrapper.chat(
+            [{"role": "user", "content": "hi"}], tools=tools, model="gpt-5.6-luna"
+        )
+
+        calls = wrapper.client.chat.completions.create.call_args_list
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0].kwargs["reasoning_effort"], "low")
+        self.assertNotIn("reasoning_effort", calls[1].kwargs)
+
+        # the next tool request skips the parameter up front
+        wrapper.client.chat.completions.create.side_effect = [fake_response()]
+        wrapper.chat(
+            [{"role": "user", "content": "hi"}], tools=tools, model="gpt-5.6-luna"
+        )
+        self.assertNotIn(
+            "reasoning_effort", wrapper.client.chat.completions.create.call_args.kwargs
+        )
+
+        # requests without tools keep it
+        wrapper.client.chat.completions.create.side_effect = [fake_response()]
+        wrapper.chat([{"role": "user", "content": "hi"}], model="gpt-5.6-luna")
+        self.assertEqual(
+            wrapper.client.chat.completions.create.call_args.kwargs["reasoning_effort"],
+            "low",
+        )
+
+
 class TestStructuredOutputWithNonStrictTools(unittest.TestCase):
     def setUp(self):
         with patch("llm_interface.openai.OpenAI"):

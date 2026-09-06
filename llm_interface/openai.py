@@ -20,6 +20,7 @@ from ollama import ListResponse
 from openai import pydantic_function_tool
 from openai import (
     APITimeoutError,
+    BadRequestError,
     ContentFilterFinishReasonError,
     LengthFinishReasonError,
     OpenAI,
@@ -199,9 +200,58 @@ class OpenAIWrapper:
         self.client = OpenAI(api_key=api_key, timeout=timeout)
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort
+        # some models (gpt-5.6-luna on chat completions) reject reasoning_effort
+        # together with function tools; remembered after the first rejection
+        self._effort_rejected_with_tools = False
 
     def list(self) -> ListResponse:
         return convert_openai_models_to_ollama_response(self.client.models.list())
+
+    def _complete(
+        self,
+        api_params: Dict[str, Any],
+        tools: Optional[List[Dict[str, Any]]],
+        kwargs: Dict[str, Any],
+    ):
+        """One request. Returns (response, message, content), or a refusal dict."""
+        if "response_schema" in kwargs:
+            schema = kwargs["response_schema"]
+            strict_tools = all(
+                tool.get("function", {}).get("strict") for tool in (tools or [])
+            )
+            if strict_tools:
+                # `client.beta.chat.completions.parse` is deprecated in openai
+                # 3.x; use the stable `client.chat.completions.parse` instead.
+                response = self.client.chat.completions.parse(
+                    response_format=schema,
+                    **api_params,
+                )
+                message = response.choices[0].message
+
+                # Check for refusal
+                if "refusal" in message:
+                    return {"refusal": message.refusal, "content": None, "done": False}
+
+                return response, message, message.parsed
+
+            # parse() refuses to run with non-strict function tools (any tool
+            # with an optional parameter). Ask for the schema as a strict
+            # json_schema response_format instead and hand the JSON text back;
+            # LLMInterface validates it against the model.
+            response = self.client.chat.completions.create(
+                response_format=_json_schema_response_format(schema),
+                **api_params,
+            )
+            message = response.choices[0].message
+            if getattr(message, "refusal", None):
+                return {"refusal": message.refusal, "content": None, "done": False}
+            return response, message, message.content
+
+        if "format" in kwargs and kwargs["format"] == "json":
+            api_params["response_format"] = {"type": "json_object"}
+        response = self.client.chat.completions.create(**api_params)
+        message = response.choices[0].message
+        return response, message, message.content
 
     def chat(
         self,
@@ -266,58 +316,36 @@ class OpenAIWrapper:
         if kwargs.get("tool_choice") is not None:
             api_params["tool_choice"] = kwargs["tool_choice"]
 
-        if self.reasoning_effort is not None:
+        if self.reasoning_effort is not None and not (
+            tools and self._effort_rejected_with_tools
+        ):
             api_params["reasoning_effort"] = self.reasoning_effort
 
         logging.debug("API parameters: %s", api_params)
 
         try:
-            if "response_schema" in kwargs:
-                schema = kwargs["response_schema"]
-                strict_tools = all(
-                    tool.get("function", {}).get("strict") for tool in (tools or [])
-                )
-                if strict_tools:
-                    # `client.beta.chat.completions.parse` is deprecated in openai
-                    # 3.x; use the stable `client.chat.completions.parse` instead.
-                    response = self.client.chat.completions.parse(
-                        response_format=schema,
-                        **api_params,
+            try:
+                completed = self._complete(api_params, tools, kwargs)
+            except BadRequestError as e:
+                message_text = str(e)
+                if (
+                    "reasoning_effort" in api_params
+                    and "reasoning_effort" in message_text
+                    and "not supported" in message_text
+                ):
+                    logging.warning(
+                        "%s rejected reasoning_effort for this request; retrying without it",
+                        api_params["model"],
                     )
-                    message = response.choices[0].message
-
-                    # Check for refusal
-                    if "refusal" in message:
-                        return {
-                            "refusal": message.refusal,
-                            "content": None,
-                            "done": False,
-                        }
-
-                    content = message.parsed
+                    if tools:
+                        self._effort_rejected_with_tools = True
+                    api_params.pop("reasoning_effort")
+                    completed = self._complete(api_params, tools, kwargs)
                 else:
-                    # parse() refuses to run with non-strict function tools (any
-                    # tool with an optional parameter). Ask for the schema as a
-                    # strict json_schema response_format instead and hand the JSON
-                    # text back; LLMInterface validates it against the model.
-                    response = self.client.chat.completions.create(
-                        response_format=_json_schema_response_format(schema),
-                        **api_params,
-                    )
-                    message = response.choices[0].message
-                    if getattr(message, "refusal", None):
-                        return {
-                            "refusal": message.refusal,
-                            "content": None,
-                            "done": False,
-                        }
-                    content = message.content
-            else:
-                if "format" in kwargs and kwargs["format"] == "json":
-                    api_params["response_format"] = {"type": "json_object"}
-                response = self.client.chat.completions.create(**api_params)
-                message = response.choices[0].message
-                content = message.content
+                    raise
+            if isinstance(completed, dict):
+                return completed  # a refusal
+            response, message, content = completed
 
             # Log the usage details
             usage = response.usage
