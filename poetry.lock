@@ -583,15 +583,15 @@ test = ["certifi (>=2024)", "cryptography-vectors (==44.0.2)", "pretend (>=0.7)"
 test-randomorder = ["pytest-randomly"]
 
 [[package]]
-name = "diskcache"
-version = "5.6.3"
-description = "Disk Cache -- Disk and file backed persistent cache."
+name = "diskcache-community"
+version = "5.8.4"
+description = "Disk Cache - Disk and file backed persistent cache."
 optional = false
-python-versions = ">=3"
+python-versions = ">=3.8"
 groups = ["main"]
 files = [
-    {file = "diskcache-5.6.3-py3-none-any.whl", hash = "sha256:5e31b2d5fbad117cc363ebaf6b689474db18a1f6438bc82358b024abd4c2ca19"},
-    {file = "diskcache-5.6.3.tar.gz", hash = "sha256:2c3a3fa2743d8535d832ec61c2054a1641f41775aa7c556758a109941e33e4fc"},
+    {file = "diskcache_community-5.8.4-py3-none-any.whl", hash = "sha256:5c60a23a3f245616f9425144c936181709ccf69e5885ef25325b29cd7c4e3744"},
+    {file = "diskcache_community-5.8.4.tar.gz", hash = "sha256:ed359124af93879978b2851a81f437c4e708f946e4ee5db7256b95f562ee0eeb"},
 ]
 
 [[package]]
@@ -2017,4 +2017,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.10"
-content-hash = "41ec05679b085e3d63376d2d1785c60d93986a4d353fc49bfc2e021b51aa893d"
+content-hash = "4b400400ac9a67bd96dadff2792c24a64056c526e4e0b373ae4ce4cd93aaf9b6"

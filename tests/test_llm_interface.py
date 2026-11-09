@@ -1,8 +1,11 @@
 import json
+import os
+import tempfile
 import unittest
 from typing import Optional
 from unittest.mock import Mock, patch
 
+import diskcache_community
 from ollama import Client
 from pydantic import BaseModel, Field
 
@@ -1552,3 +1555,46 @@ class TestTemperatureZero(unittest.TestCase):
         with_zero = self.llm._create_prompt_hash("m", "c", "", temperature=0.0)
         unset = self.llm._create_prompt_hash("m", "c", "", temperature=None)
         self.assertNotEqual(with_zero, unset)
+
+
+planted_calls = []
+
+
+def planted_response():
+    planted_calls.append(True)
+    return {"message": {"content": "planted"}}
+
+
+class PlantedResponse:
+    def __reduce__(self):
+        return (planted_response, ())
+
+
+class TestResponseCacheOnDisk(unittest.TestCase):
+    def setUp(self):
+        self.cwd = os.getcwd()
+        self.tmp = tempfile.TemporaryDirectory()
+        os.chdir(self.tmp.name)
+        self.mock_client = Mock(spec=Client)
+        self.llm = LLMInterface(client=self.mock_client)
+        self.messages = [{"role": "user", "content": "What is the capital of France?"}]
+        planted_calls.clear()
+
+    def tearDown(self):
+        self.llm.disk_cache.close()
+        os.chdir(self.cwd)
+        self.tmp.cleanup()
+
+    def test_planted_pickle_is_a_miss(self):
+        self.mock_client.chat.return_value = {"message": {"content": "Paris"}}
+        self.llm.chat(messages=self.messages)
+
+        with diskcache_community.Cache(
+            ".response_cache", disk=diskcache_community.Disk
+        ) as writer:
+            (key,) = list(writer)
+            writer.set(key, PlantedResponse())
+
+        self.assertEqual(self.llm.chat(messages=self.messages), "Paris")
+        self.assertEqual(planted_calls, [])
+        self.assertEqual(self.mock_client.chat.call_count, 2)

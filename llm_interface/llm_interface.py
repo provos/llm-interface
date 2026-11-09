@@ -18,7 +18,7 @@ import re
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
-import diskcache
+import diskcache_community
 from dotenv import load_dotenv
 from ollama import Client, ListResponse
 from pydantic import BaseModel, Field, create_model
@@ -133,8 +133,10 @@ class LLMInterface:
 
         # Initialize disk cache for caching responses
         self.disk_cache = (
-            diskcache.Cache(
-                directory=".response_cache", eviction_policy="least-recently-used"
+            diskcache_community.Cache(
+                directory=".response_cache",
+                eviction_policy="least-recently-used",
+                disk=diskcache_community.SafeDisk.with_options(on_error="miss"),
             )
             if use_cache
             else NoCache()
@@ -589,7 +591,12 @@ class LLMInterface:
 
             # Cache the response with hashed prompt as key
             try:
-                self.disk_cache.set(prompt_hash, response)
+                if isinstance(response, BaseModel):
+                    response = response.model_dump(mode="json")
+                message = dict(response.get("message", {}))
+                if isinstance(message.get("content"), BaseModel):
+                    message["content"] = message["content"].model_dump_json()
+                self.disk_cache.set(prompt_hash, {**response, "message": message})
             except Exception as e:
                 self.logger.error("Error caching response: %s", e)
 
