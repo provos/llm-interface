@@ -758,6 +758,7 @@ class LLMInterface:
             new_output_schema = self._inject_thinking_if_needed(output_schema)
 
         response = None
+        valid = False
         iteration = 0
         while iteration < 3:
             iteration += 1
@@ -837,7 +838,16 @@ class LLMInterface:
                         },
                     ]
                     continue
+            valid = True
             break
+
+        if not valid:
+            # every attempt failed parsing or validation; never hand back the
+            # last invalid answer as if it were good
+            self.logger.error(
+                "No valid response after %d attempts; giving up", iteration
+            )
+            return None
 
         if debug_saver is not None:
             assert isinstance(response, BaseModel)
