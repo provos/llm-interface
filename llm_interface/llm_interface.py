@@ -587,11 +587,15 @@ class LLMInterface:
                 transcript.clear()
                 transcript.extend(current_messages)
 
-            # Cache the response with hashed prompt as key
-            try:
-                self.disk_cache.set(prompt_hash, response)
-            except Exception as e:
-                self.logger.error("Error caching response: %s", e)
+            # Cache the response with hashed prompt as key. Errors are not
+            # cached: a timeout, rate limit or server error that outlasted the
+            # retries would otherwise fail this prompt on every later call
+            # without reaching the provider.
+            if "error" not in response:
+                try:
+                    self.disk_cache.set(prompt_hash, response)
+                except Exception as e:
+                    self.logger.error("Error caching response: %s", e)
 
         if "error" in response:
             self.logger.error("Error in chat response: %s", response["error"])

@@ -1552,3 +1552,46 @@ class TestTemperatureZero(unittest.TestCase):
         with_zero = self.llm._create_prompt_hash("m", "c", "", temperature=0.0)
         unset = self.llm._create_prompt_hash("m", "c", "", temperature=None)
         self.assertNotEqual(with_zero, unset)
+
+
+class TestErrorsAreNotCached(unittest.TestCase):
+    """An error response must not be replayed from the cache on later calls."""
+
+    def setUp(self):
+        self.mock_client = Mock(spec=Client)
+        self.llm = LLMInterface(client=self.mock_client, max_retries=0)
+        self.llm.disk_cache = MockCache()
+        self.messages = [{"role": "user", "content": "What is the capital of France?"}]
+
+    def test_error_responses_are_not_cached(self):
+        for error_type in (
+            errors.TIMEOUT,
+            errors.CONNECTION,
+            errors.RATE_LIMIT,
+            errors.HTTP,
+            errors.PROVIDER_SPECIFIC,
+            errors.LENGTH,
+        ):
+            with self.subTest(error_type=error_type):
+                self.llm.disk_cache = MockCache()
+                self.mock_client.chat.reset_mock()
+                self.mock_client.chat.side_effect = [
+                    {"error": "failed", "error_type": error_type, "content": None},
+                    {"message": {"content": "Paris"}},
+                ]
+
+                with self.assertRaises(ModelError):
+                    self.llm.chat(messages=self.messages)
+                self.assertEqual(self.llm.disk_cache.store, {})
+
+                self.assertEqual(self.llm.chat(messages=self.messages), "Paris")
+                self.assertEqual(self.mock_client.chat.call_count, 2)
+
+    def test_refusals_are_still_cached(self):
+        self.mock_client.chat.return_value = {"refusal": "no", "content": None}
+
+        for _ in range(2):
+            with self.assertRaises(ModelError):
+                self.llm.chat(messages=self.messages)
+
+        self.assertEqual(self.mock_client.chat.call_count, 1)
